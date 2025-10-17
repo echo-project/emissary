@@ -22,6 +22,7 @@ use crate::{
     LOG_TARGET,
 };
 
+use emissary_core::PrivateNetworkConfig;
 use home::home_dir;
 use rand::{rngs::OsRng, thread_rng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -410,6 +411,11 @@ impl From<Config> for emissary_core::Config {
             static_key: Some(val.static_key),
             transit: val.transit,
             refresh_interval: val.router_ui.map(|config| config.refresh_interval),
+            private_network: Some(PrivateNetworkConfig {
+                enabled: true,
+                known_relays: vec![],
+                min_bandwidth: Some("O".to_string()),
+            })
         }
     }
 }

@@ -27,6 +27,7 @@ use crate::{
     shutdown::ShutdownHandle,
     subsystem::SubsystemEvent,
     transport::TransportService,
+    private_network::PrivateNetworkValidator,
     tunnel::{
         handle::{CommandRecycle, TunnelManagerCommand},
         metrics::*,
@@ -143,6 +144,7 @@ impl<R: Runtime> TunnelManager<R> {
         insecure_tunnels: bool,
         transit_config: Option<TransitConfig>,
         transit_shutdown_handle: ShutdownHandle,
+        private_network: PrivateNetworkValidator,
     ) -> (
         Self,
         TunnelManagerHandle,
@@ -186,6 +188,7 @@ impl<R: Runtime> TunnelManager<R> {
                 router_ctx.profile_storage().clone(),
                 build_parameters.context_handle.clone(),
                 insecure_tunnels,
+                private_network
             );
             let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
                 build_parameters,

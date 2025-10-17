@@ -22,6 +22,7 @@ use crate::{
     crypto::StaticPublicKey,
     primitives::{RouterId, TransportKind, TunnelId},
     profile::{Bucket, ProfileStorage},
+    private_network::PrivateNetworkValidator,
     runtime::Runtime,
     tunnel::pool::TunnelPoolContextHandle,
     util::shuffle,
@@ -128,6 +129,9 @@ pub struct ExploratorySelector<R: Runtime> {
 
     /// Router participation.
     router_participation: Arc<RwLock<HashMap<RouterId, usize>>>,
+
+    /// Private network validator.
+    private_network: PrivateNetworkValidator,
 }
 
 impl<R: Runtime> ExploratorySelector<R> {
@@ -136,6 +140,7 @@ impl<R: Runtime> ExploratorySelector<R> {
         profile_storage: ProfileStorage<R>,
         handle: TunnelPoolContextHandle,
         insecure: bool,
+        private_network: PrivateNetworkValidator,
     ) -> Self {
         Self {
             handle,
@@ -145,6 +150,7 @@ impl<R: Runtime> ExploratorySelector<R> {
             outbound: Default::default(),
             profile_storage,
             router_participation: Default::default(),
+            private_network,
         }
     }
 
@@ -383,6 +389,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                     && router_info.is_reachable()
                     && router_info.is_usable()
                     && (self.insecure || self.can_participate(router_id))
+                    && self.private_network.can_be_tunnel_hop(router_id, router_info)
             },
         );
 
@@ -392,10 +399,11 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
 
             if router_ids.len() < num_hops {
                 let mut extra_router_ids =
-                    self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
+                    self.profile_storage.get_router_ids(Bucket::Fast, |router_id, router_info, profile| {
                         !profile.is_failing::<R>()
                             && router_info.is_reachable()
                             && router_info.is_usable()
+                            && self.private_network.can_be_tunnel_hop(router_id, router_info)
                     });
 
                 // if there aren't enough routers in the fast bucket,
@@ -405,10 +413,11 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 if num_needed > extra_router_ids.len() {
                     let untracked = self.profile_storage.get_router_ids(
                         Bucket::Untracked,
-                        |_, router_info, profile| {
+                        |router_id, router_info, profile| {
                             !profile.is_failing::<R>()
                                 && router_info.is_reachable()
                                 && router_info.is_usable()
+                                && self.private_network.can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -423,8 +432,9 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 // if there aren't enough routers, use failing routers
                 if num_needed > extra_router_ids.len() {
                     let failing =
-                        self.profile_storage.get_router_ids(Bucket::Any, |_, router_info, _| {
+                        self.profile_storage.get_router_ids(Bucket::Any, |router_id, router_info, _| {
                             router_info.is_reachable()
+                                && self.private_network.can_be_tunnel_hop(router_id, router_info)
                         });
 
                     extra_router_ids.extend(failing);
@@ -486,6 +496,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                         && router_info.is_reachable()
                         && router_info.is_usable()
                         && self.can_participate(router_id)
+                        && self.private_network.can_be_tunnel_hop(router_id, router_info)
                 },
             );
 
@@ -500,15 +511,16 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 .collect::<HashMap<_, _>>();
 
             let untracked = (routers.len() + fast_router_addresses.len() < num_hops).then(|| {
-                let untracked_router_ids = self.profile_storage.get_router_ids(
-                    Bucket::Untracked,
-                    |router_id, router_info, profile| {
-                        !profile.is_failing::<R>()
-                            && router_info.is_reachable()
-                            && router_info.is_usable()
-                            && self.can_participate(router_id)
-                    },
-                );
+                    let untracked_router_ids = self.profile_storage.get_router_ids(
+                        Bucket::Untracked,
+                        |router_id, router_info, profile| {
+                            !profile.is_failing::<R>()
+                                && router_info.is_reachable()
+                                && router_info.is_usable()
+                                && self.can_participate(router_id)
+                                && self.private_network.can_be_tunnel_hop(router_id, router_info)
+                        },
+                    );
 
                 // group untracked routers by subnet and filter out subnets which the
                 // already-selected routers are part of
@@ -530,7 +542,9 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                     let failing_router_ids = self.profile_storage.get_router_ids(
                         Bucket::Any,
                         |router_id, router_info, _| {
-                            router_info.is_reachable() && self.can_participate(router_id)
+                            router_info.is_reachable() 
+                                && self.can_participate(router_id)
+                                && self.private_network.can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -775,6 +789,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                     && router_info.is_reachable()
                     && router_info.is_usable()
                     && (self.exploratory.insecure || self.exploratory.can_participate(router_id))
+                    && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
             },
         );
 
@@ -785,10 +800,11 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             if router_ids.len() < num_hops {
                 let mut extra_router_ids = self.exploratory.profile_storage.get_router_ids(
                     Bucket::Standard,
-                    |_, router_info, profile| {
+                    |router_id, router_info, profile| {
                         !profile.is_failing::<R>()
                             && router_info.is_reachable()
                             && router_info.is_usable()
+                            && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
                     },
                 );
 
@@ -799,10 +815,11 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                 if num_needed > extra_router_ids.len() {
                     let untracked = self.exploratory.profile_storage.get_router_ids(
                         Bucket::Untracked,
-                        |_, router_info, profile| {
+                        |router_id, router_info, profile| {
                             !profile.is_failing::<R>()
                                 && router_info.is_reachable()
                                 && router_info.is_usable()
+                                && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -819,8 +836,9 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                     let failing = self
                         .exploratory
                         .profile_storage
-                        .get_router_ids(Bucket::Any, |_, router_info, _| {
+                        .get_router_ids(Bucket::Any, |router_id, router_info, _| {
                             router_info.is_reachable()
+                                && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
                         });
 
                     extra_router_ids.extend(failing);
@@ -880,6 +898,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         && router_info.is_reachable()
                         && router_info.is_usable()
                         && self.exploratory.can_participate(router_id)
+                        && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
                 },
             );
 
@@ -903,6 +922,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                                 && router_info.is_reachable()
                                 && router_info.is_usable()
                                 && self.exploratory.can_participate(router_id)
+                                && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -929,6 +949,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         |router_id, router_info, _| {
                             router_info.is_reachable()
                                 && self.exploratory.can_participate(router_id)
+                                && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -1051,6 +1072,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         assert!(selector.select_hops(5).is_none());
     }
@@ -1072,6 +1094,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
 
         // select hops 5 times and verify that the same set of hops is not selected every time
@@ -1135,6 +1158,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
 
         // there are only 3 standard routers so 2 routers must be fast
@@ -1175,6 +1199,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1199,6 +1224,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1247,6 +1273,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1316,6 +1343,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
 
         // since three hops were requested but there were only two subnets,
@@ -1369,6 +1397,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1409,6 +1438,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
 
         // 5 hops requested but only 3 routers in the standard category
@@ -1447,6 +1477,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1500,6 +1531,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
+            PrivateNetworkValidator::new(None),
         );
 
         let hops = selector.select_hops(3).unwrap();
@@ -1557,6 +1589,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1615,6 +1648,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
+            PrivateNetworkValidator::new(None),
         );
 
         let hops = selector.select_hops(5usize).unwrap();
@@ -1696,6 +1730,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1743,6 +1778,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         assert!(routers.iter().all(|router_id| selector.can_participate(router_id)));
 
@@ -1829,6 +1865,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
 
         let hops1 = selector
@@ -1868,6 +1905,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
+            PrivateNetworkValidator::new(None),
         );
 
         let hops1 = selector
@@ -1914,6 +1952,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
 
         let hops1 = selector
@@ -1981,6 +2020,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -2023,6 +2063,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -2072,6 +2113,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            PrivateNetworkValidator::new(None),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());

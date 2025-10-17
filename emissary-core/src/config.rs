@@ -123,13 +123,27 @@ pub struct MetricsConfig {
     pub port: u16,
 }
 
-/// Metrics configuration.
+/// Transit tunnel configuration.
 #[derive(Default, Debug, Clone)]
 pub struct TransitConfig {
     /// Maximum number of transit tunnels.
     ///
     /// If `None`, there are no limit on transit tunnels.
     pub max_tunnels: Option<usize>,
+}
+
+/// Private network configuration.
+#[derive(Debug, Clone)]
+pub struct PrivateNetworkConfig {
+    /// Whether private network mode is enabled.
+    pub enabled: bool,
+    
+    /// List of known relay router IDs (base64 encoded).
+    pub known_relays: Vec<String>,
+    
+    /// Minimum bandwidth requirement for known relays.
+    /// Valid values: "O" (high), "P" (medium), "X" (low).
+    pub min_bandwidth: Option<String>,
 }
 
 /// Router configuration.
@@ -194,4 +208,9 @@ pub struct Config {
 
     /// Router static key.
     pub static_key: Option<[u8; 32]>,
+
+    /// Private network configuration.
+    ///
+    /// `None` if private network mode is disabled.
+    pub private_network: Option<PrivateNetworkConfig>,
 }

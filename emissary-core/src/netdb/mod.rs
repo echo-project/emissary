@@ -36,6 +36,7 @@ use crate::{
     primitives::{LeaseSet2, RouterId, RouterInfo},
     profile::Bucket,
     router::context::RouterContext,
+    private_network::PrivateNetworkValidator,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::SubsystemEvent,
     transport::TransportService,
@@ -194,6 +195,9 @@ pub struct NetDb<R: Runtime> {
     /// Router context.
     router_ctx: RouterContext<R>,
 
+    /// Private network validator.
+    private_network: PrivateNetworkValidator,
+
     /// DHT of non-floodfill routers.
     ///
     /// Available only if the router is acting as a floodfill router.
@@ -225,6 +229,7 @@ impl<R: Runtime> NetDb<R> {
         exploratory_pool_handle: TunnelPoolHandle,
         routing_table: RoutingTable,
         netdb_msg_rx: mpsc::Receiver<Message>,
+        private_network: PrivateNetworkValidator,
     ) -> (Self, NetDbHandle) {
         let floodfills = router_ctx
             .profile_storage()
@@ -292,6 +297,7 @@ impl<R: Runtime> NetDb<R> {
                 pending_ready_awaits: Vec::new(),
                 query_timers: R::join_set(),
                 router_ctx: router_ctx.clone(),
+                private_network,
                 router_dht,
                 router_infos: HashMap::new(),
                 routers: HashMap::new(),
@@ -310,6 +316,9 @@ impl<R: Runtime> NetDb<R> {
     /// Handle established connection to `router`.
     fn on_connection_established(&mut self, router_id: RouterId) {
         let is_floodfill = self.router_ctx.profile_storage().is_floodfill(&router_id);
+        
+        // Get router info for private network validation
+        let router_info = self.router_ctx.profile_storage().reader().router_info(&router_id).cloned();
 
         // send any pending messages to the connected router
         //
@@ -353,10 +362,44 @@ impl<R: Runtime> NetDb<R> {
         }
 
         if is_floodfill {
-            self.floodfill_dht.add_router(router_id.clone());
-            self.router_ctx.metrics_handle().gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
+            // Only add floodfill routers that are allowed by private network policy
+            if let Some(router_info) = &router_info {
+                if self.private_network.can_be_floodfill(&router_id, router_info) {
+                    self.floodfill_dht.add_router(router_id.clone());
+                    self.router_ctx.metrics_handle().gauge(NUM_CONNECTED_FLOODFILLS).increment(1);
+                } else {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "router rejected as floodfill: not allowed by private network policy"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "router info not found for floodfill validation"
+                );
+            }
         } else {
-            self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
+            // Only add routers that are allowed by private network policy
+            if let Some(router_info) = &router_info {
+                if self.private_network.can_be_added_to_routing_table(&router_id, router_info) {
+                    self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
+                } else {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "router rejected from routing table: not allowed by private network policy"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "router info not found for routing table validation"
+                );
+            }
         }
 
         self.routers.insert(router_id, RouterState::Connected);
@@ -510,13 +553,23 @@ impl<R: Runtime> NetDb<R> {
         let published = *router_info.published.date();
 
         if router_info.is_floodfill() {
-            self.floodfill_dht.add_router(router_id.clone());
+            // Only add floodfill routers that are allowed by private network policy
+            if self.private_network.can_be_floodfill(&router_id, &router_info) {
+                self.floodfill_dht.add_router(router_id.clone());
+            } else {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "router rejected as floodfill: not allowed by private network policy"
+                );
+            }
         }
 
         // store both the new router info and its serialized form to profile storage
         //
         // the latter is used when a backup of profile storage is made to disk
         let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
+        let router_info_clone = router_info.clone();
         self.router_ctx
             .profile_storage()
             .discover_router(router_info, raw_router_info.clone());
@@ -531,7 +584,17 @@ impl<R: Runtime> NetDb<R> {
             key.clone(),
             (raw_router_info.clone(), Duration::from_millis(published)),
         );
-        self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
+        
+        // Only add routers that are allowed by private network policy
+        if self.private_network.can_be_added_to_routing_table(&router_id, &router_info_clone) {
+            self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
+        } else {
+            tracing::debug!(
+                target: LOG_TARGET,
+                %router_id,
+                "router rejected from routing table: not allowed by private network policy"
+            );
+        }
 
         match reply {
             StoreReplyType::None => {
@@ -1097,9 +1160,28 @@ impl<R: Runtime> NetDb<R> {
                     }
 
                     if router_info.is_floodfill() {
-                        self.floodfill_dht.add_router(router_id.clone());
+                        // Only add floodfill routers that are allowed by private network policy
+                        if self.private_network.can_be_floodfill(&router_id, &router_info) {
+                            self.floodfill_dht.add_router(router_id.clone());
+                        } else {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                %router_id,
+                                "router rejected as floodfill: not allowed by private network policy"
+                            );
+                        }
                     }
-                    self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
+                    
+                    // Only add routers that are allowed by private network policy
+                    if self.private_network.can_be_added_to_routing_table(&router_id, &router_info) {
+                        self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
+                    } else {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "router rejected from routing table: not allowed by private network policy"
+                        );
+                    }
 
                     // if the router info was received directly from the floodfill, i.e., not
                     // through tunnel, adjust the floodfill score
@@ -2098,6 +2180,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2114,6 +2198,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, lease_set) = {
@@ -2216,6 +2301,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2232,6 +2319,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, lease_set) = {
@@ -2317,6 +2405,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2333,6 +2423,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, lease_set) = {
@@ -2420,6 +2511,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2436,6 +2529,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key1, expired_lease_set1) = {
@@ -2734,6 +2828,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2750,6 +2846,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, router_info) = {
@@ -2848,6 +2945,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2864,6 +2963,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, router_info) = {
@@ -2941,6 +3041,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2957,6 +3059,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, lease_set, expires) = {
@@ -3064,6 +3167,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3080,6 +3185,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let key = Bytes::from(DestinationId::random().to_vec());
@@ -3163,6 +3269,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3179,6 +3287,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, router_info) = {
@@ -3284,6 +3393,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3300,6 +3411,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let key = Bytes::from(RouterId::random().to_vec());
@@ -3363,6 +3475,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3379,6 +3493,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         // publish local router info
@@ -3447,6 +3562,8 @@ mod tests {
         let (tm_mgr_tx, _tm_mgr_rx) = with_recycle(64, RoutingKindRecycle::default());
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
+        
+        let private_network_validator = PrivateNetworkValidator::new(None);
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -3464,6 +3581,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator
         );
 
         let (key1, expired_lease_set1) = {
@@ -3713,6 +3831,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3729,6 +3849,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key1, expiring_router_info) = {
@@ -3967,6 +4088,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3983,6 +4106,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, router_info) = {
@@ -4059,6 +4183,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4075,6 +4201,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, lease_set) = {
@@ -4155,6 +4282,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4171,6 +4300,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, router_info) = {
@@ -4248,6 +4378,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4264,6 +4396,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         netdb
@@ -4420,6 +4553,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+        
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4436,6 +4571,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         // publish local router info and poll netdb so the request is handled
@@ -4524,6 +4660,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+        
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4540,6 +4678,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         netdb
@@ -4596,6 +4735,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+        
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4612,6 +4753,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         netdb
@@ -4675,6 +4817,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+        
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4691,6 +4835,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         netdb
@@ -4755,6 +4900,8 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
+        let private_network_validator = PrivateNetworkValidator::new(None);
+        
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4771,6 +4918,7 @@ mod tests {
             tp_handle,
             rtbl,
             msg_rx,
+            private_network_validator,
         );
 
         let (key, lease_set) = {

@@ -35,7 +35,7 @@ extern crate alloc;
 pub type Result<T> = core::result::Result<T, Error>;
 
 pub use config::{
-    Config, ExploratoryConfig, I2cpConfig, MetricsConfig, Ntcp2Config, SamConfig, Ssu2Config,
+    Config, ExploratoryConfig, I2cpConfig, MetricsConfig, Ntcp2Config, PrivateNetworkConfig, SamConfig, Ssu2Config,
     TransitConfig,
 };
 pub use error::Error;
@@ -47,6 +47,7 @@ mod destination;
 mod error;
 mod i2cp;
 mod netdb;
+mod private_network;
 mod profile;
 mod sam;
 mod shutdown;

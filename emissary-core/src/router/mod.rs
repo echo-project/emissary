@@ -17,21 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    config::{Config, I2cpConfig, MetricsConfig, SamConfig},
-    crypto::{SigningPrivateKey, StaticPrivateKey},
-    error::Error,
-    events::{EventManager, EventSubscriber},
-    i2cp::I2cpServer,
-    netdb::NetDb,
-    primitives::RouterInfo,
-    profile::ProfileStorage,
-    router::context::RouterContext,
-    runtime::{AddressBook, Runtime, Storage},
-    sam::SamServer,
-    shutdown::ShutdownContext,
-    subsystem::SubsystemKind,
-    transport::{Ntcp2Transport, Ssu2Transport, TransportManager, TransportManagerBuilder},
-    tunnel::{TunnelManager, TunnelManagerHandle},
+    config::{Config, I2cpConfig, MetricsConfig, SamConfig}, crypto::{SigningPrivateKey, StaticPrivateKey}, error::Error, events::{EventManager, EventSubscriber}, i2cp::I2cpServer, netdb::NetDb, primitives::RouterInfo, private_network::{self, PrivateNetworkValidator}, profile::ProfileStorage, router::context::RouterContext, runtime::{AddressBook, Runtime, Storage}, sam::SamServer, shutdown::ShutdownContext, subsystem::SubsystemKind, transport::{Ntcp2Transport, Ssu2Transport, TransportManager, TransportManagerBuilder}, tunnel::{TunnelManager, TunnelManagerHandle}
 };
 
 use bytes::Bytes;
@@ -213,8 +199,13 @@ impl<R: Runtime> Router<R> {
             metrics,
             transit,
             refresh_interval,
+            private_network,
             ..
         } = config;
+
+        let private_network_validator = PrivateNetworkValidator::new(Some(&private_network.unwrap_or(
+            crate::PrivateNetworkConfig { enabled: true, known_relays: vec![], min_bandwidth: Some("O".to_string()) }
+        )));
 
         let profile_storage = ProfileStorage::<R>::new(&routers, &profiles);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
@@ -307,6 +298,7 @@ impl<R: Runtime> Router<R> {
                 insecure_tunnels,
                 transit,
                 transit_shutdown_handle,
+                private_network_validator.clone()
             );
 
             R::spawn(tunnel_manager);
@@ -330,6 +322,7 @@ impl<R: Runtime> Router<R> {
                 exploratory_pool_handle,
                 routing_table,
                 netdb_msg_rx,
+                private_network_validator
             );
 
             R::spawn(netdb);
