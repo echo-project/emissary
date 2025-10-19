@@ -20,7 +20,7 @@
 
 use crate::{
     config::PrivateNetworkConfig,
-    primitives::{RouterId, RouterInfo},
+    primitives::{RouterId, RouterInfo, Str},
     crypto::base64_decode,
 };
 
@@ -244,7 +244,7 @@ impl PrivateNetworkValidator {
 mod tests {
     use super::*;
     use crate::{
-        primitives::{Capabilities, RouterIdentity},
+        primitives::{Capabilities, RouterIdentity, Str},
         runtime::mock::MockRuntime,
     };
     use hashbrown::HashMap;
