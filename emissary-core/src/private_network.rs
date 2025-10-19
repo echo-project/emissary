@@ -20,7 +20,7 @@
 
 use crate::{
     config::PrivateNetworkConfig,
-    primitives::{RouterId, RouterInfo, Str},
+    primitives::{RouterId, RouterInfo},
     crypto::base64_decode,
 };
 
@@ -251,7 +251,7 @@ mod tests {
 
     fn create_test_router_info(caps: &str) -> RouterInfo {
         let (identity, _, _) = RouterIdentity::random();
-        let capabilities = Capabilities::parse(&Str::from(caps)).unwrap();
+        let capabilities = Capabilities::parse(&Str::from(caps.to_string())).unwrap();
         
         RouterInfo {
             identity,
