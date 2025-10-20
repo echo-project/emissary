@@ -49,6 +49,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+use std::sync::{Arc as StdArc, Mutex};
 
 mod fragment;
 mod garlic;
@@ -144,7 +145,7 @@ impl<R: Runtime> TunnelManager<R> {
         insecure_tunnels: bool,
         transit_config: Option<TransitConfig>,
         transit_shutdown_handle: ShutdownHandle,
-        private_network: PrivateNetworkValidator,
+        private_network: StdArc<Mutex<PrivateNetworkValidator>>,
     ) -> (
         Self,
         TunnelManagerHandle,
@@ -188,7 +189,7 @@ impl<R: Runtime> TunnelManager<R> {
                 router_ctx.profile_storage().clone(),
                 build_parameters.context_handle.clone(),
                 insecure_tunnels,
-                private_network
+                private_network.clone()
             );
             let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
                 build_parameters,

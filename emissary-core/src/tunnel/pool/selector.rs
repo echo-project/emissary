@@ -42,7 +42,7 @@ use core::{
     net::SocketAddr,
     sync::atomic::{AtomicUsize, Ordering},
 };
-
+use std::sync::{Arc as StdArc, Mutex};
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::selector";
 
@@ -131,7 +131,7 @@ pub struct ExploratorySelector<R: Runtime> {
     router_participation: Arc<RwLock<HashMap<RouterId, usize>>>,
 
     /// Private network validator.
-    private_network: PrivateNetworkValidator,
+    private_network: StdArc<Mutex<PrivateNetworkValidator>>,
 }
 
 impl<R: Runtime> ExploratorySelector<R> {
@@ -140,7 +140,7 @@ impl<R: Runtime> ExploratorySelector<R> {
         profile_storage: ProfileStorage<R>,
         handle: TunnelPoolContextHandle,
         insecure: bool,
-        private_network: PrivateNetworkValidator,
+        private_network: StdArc<Mutex<PrivateNetworkValidator>>,
     ) -> Self {
         Self {
             handle,
@@ -389,7 +389,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                     && router_info.is_reachable()
                     && router_info.is_usable()
                     && (self.insecure || self.can_participate(router_id))
-                    && self.private_network.can_be_tunnel_hop(router_id, router_info)
+                    && self.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
             },
         );
 
@@ -403,7 +403,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                         !profile.is_failing::<R>()
                             && router_info.is_reachable()
                             && router_info.is_usable()
-                            && self.private_network.can_be_tunnel_hop(router_id, router_info)
+                            && self.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                     });
 
                 // if there aren't enough routers in the fast bucket,
@@ -417,7 +417,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                             !profile.is_failing::<R>()
                                 && router_info.is_reachable()
                                 && router_info.is_usable()
-                                && self.private_network.can_be_tunnel_hop(router_id, router_info)
+                                && self.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -434,7 +434,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                     let failing =
                         self.profile_storage.get_router_ids(Bucket::Any, |router_id, router_info, _| {
                             router_info.is_reachable()
-                                && self.private_network.can_be_tunnel_hop(router_id, router_info)
+                                && self.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                         });
 
                     extra_router_ids.extend(failing);
@@ -496,7 +496,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                         && router_info.is_reachable()
                         && router_info.is_usable()
                         && self.can_participate(router_id)
-                        && self.private_network.can_be_tunnel_hop(router_id, router_info)
+                        && self.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                 },
             );
 
@@ -518,7 +518,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                                 && router_info.is_reachable()
                                 && router_info.is_usable()
                                 && self.can_participate(router_id)
-                                && self.private_network.can_be_tunnel_hop(router_id, router_info)
+                                && self.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -544,7 +544,7 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                         |router_id, router_info, _| {
                             router_info.is_reachable() 
                                 && self.can_participate(router_id)
-                                && self.private_network.can_be_tunnel_hop(router_id, router_info)
+                                && self.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -789,7 +789,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                     && router_info.is_reachable()
                     && router_info.is_usable()
                     && (self.exploratory.insecure || self.exploratory.can_participate(router_id))
-                    && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
+                    && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
             },
         );
 
@@ -804,7 +804,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         !profile.is_failing::<R>()
                             && router_info.is_reachable()
                             && router_info.is_usable()
-                            && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
+                            && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                     },
                 );
 
@@ -819,7 +819,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                             !profile.is_failing::<R>()
                                 && router_info.is_reachable()
                                 && router_info.is_usable()
-                                && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
+                                && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -838,7 +838,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         .profile_storage
                         .get_router_ids(Bucket::Any, |router_id, router_info, _| {
                             router_info.is_reachable()
-                                && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
+                                && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                         });
 
                     extra_router_ids.extend(failing);
@@ -898,7 +898,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         && router_info.is_reachable()
                         && router_info.is_usable()
                         && self.exploratory.can_participate(router_id)
-                        && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
+                        && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                 },
             );
 
@@ -922,7 +922,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                                 && router_info.is_reachable()
                                 && router_info.is_usable()
                                 && self.exploratory.can_participate(router_id)
-                                && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
+                                && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -949,7 +949,7 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         |router_id, router_info, _| {
                             router_info.is_reachable()
                                 && self.exploratory.can_participate(router_id)
-                                && self.exploratory.private_network.can_be_tunnel_hop(router_id, router_info)
+                                && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
                         },
                     );
 
@@ -1054,7 +1054,8 @@ mod tests {
         runtime::mock::MockRuntime,
         tunnel::pool::TunnelPoolBuildParameters,
     };
-
+    use std::sync::{Arc as StdArc, Mutex};
+    
     #[tokio::test]
     async fn not_enough_routers_for_exploratory_tunnel() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
@@ -1072,7 +1073,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         assert!(selector.select_hops(5).is_none());
     }
@@ -1094,7 +1095,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         // select hops 5 times and verify that the same set of hops is not selected every time
@@ -1158,7 +1159,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         // there are only 3 standard routers so 2 routers must be fast
@@ -1199,7 +1200,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1224,7 +1225,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1273,7 +1274,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1343,7 +1344,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         // since three hops were requested but there were only two subnets,
@@ -1397,7 +1398,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1438,7 +1439,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         // 5 hops requested but only 3 routers in the standard category
@@ -1477,7 +1478,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1531,7 +1532,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         let hops = selector.select_hops(3).unwrap();
@@ -1589,7 +1590,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1648,7 +1649,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         let hops = selector.select_hops(5usize).unwrap();
@@ -1730,7 +1731,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1778,7 +1779,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         assert!(routers.iter().all(|router_id| selector.can_participate(router_id)));
 
@@ -1865,7 +1866,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         let hops1 = selector
@@ -1905,7 +1906,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         let hops1 = selector
@@ -1952,7 +1953,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         let hops1 = selector
@@ -2020,7 +2021,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -2063,7 +2064,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -2113,7 +2114,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
-            PrivateNetworkValidator::new(None),
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());

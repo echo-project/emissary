@@ -59,6 +59,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+use std::sync::{Arc as StdArc, Mutex};
 
 pub use dht::Dht;
 pub use handle::NetDbHandle;
@@ -229,7 +230,7 @@ impl<R: Runtime> NetDb<R> {
         exploratory_pool_handle: TunnelPoolHandle,
         routing_table: RoutingTable,
         netdb_msg_rx: mpsc::Receiver<Message>,
-        private_network: PrivateNetworkValidator,
+        private_network: StdArc<Mutex<PrivateNetworkValidator>>,
     ) -> (Self, NetDbHandle) {
         let floodfills = router_ctx
             .profile_storage()
@@ -297,7 +298,7 @@ impl<R: Runtime> NetDb<R> {
                 pending_ready_awaits: Vec::new(),
                 query_timers: R::join_set(),
                 router_ctx: router_ctx.clone(),
-                private_network,
+                private_network: private_network.lock().unwrap().clone(),
                 router_dht,
                 router_infos: HashMap::new(),
                 routers: HashMap::new(),
@@ -2180,7 +2181,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -2301,7 +2302,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -2405,7 +2406,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -2511,7 +2512,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -2828,7 +2829,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -2945,7 +2946,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -3041,7 +3042,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -3167,7 +3168,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -3269,7 +3270,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -3393,7 +3394,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -3475,7 +3476,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -3563,7 +3564,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
         
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -3831,7 +3832,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4088,7 +4089,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4183,7 +4184,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4282,7 +4283,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4378,7 +4379,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4553,7 +4554,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4660,7 +4661,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4735,7 +4736,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4817,7 +4818,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
@@ -4900,7 +4901,7 @@ mod tests {
         let (transit_tx, _transit_rx) = channel(64);
         let rtbl = RoutingTable::new(router_info.identity.id(), tm_mgr_tx, transit_tx);
 
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(

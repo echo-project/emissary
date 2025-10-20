@@ -33,6 +33,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+use std::sync::{Arc as StdArc, Mutex};
 
 pub mod context;
 
@@ -203,9 +204,13 @@ impl<R: Runtime> Router<R> {
             ..
         } = config;
 
-        let private_network_validator = PrivateNetworkValidator::new(Some(&private_network.unwrap_or(
+        // let private_network_validator = PrivateNetworkValidator::new(Some(&private_network.unwrap_or(
+        //     crate::PrivateNetworkConfig { enabled: true, known_relays: vec![], min_bandwidth: Some("O".to_string()) }
+        // )));
+
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(Some(&private_network.unwrap_or(
             crate::PrivateNetworkConfig { enabled: true, known_relays: vec![], min_bandwidth: Some("O".to_string()) }
-        )));
+        )))));
 
         let profile_storage = ProfileStorage::<R>::new(&routers, &profiles);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);

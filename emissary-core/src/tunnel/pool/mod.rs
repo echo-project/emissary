@@ -1482,6 +1482,7 @@ mod tests {
         }
     };
     use thingbuf::mpsc;
+    use std::sync::{Arc as StdArc, Mutex};
 
     #[tokio::test]
     async fn build_outbound_exploratory_tunnel() {
@@ -1512,7 +1513,7 @@ mod tests {
         let routing_table = RoutingTable::new(router_info.identity.id(), manager_tx, transit_tx);
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -1605,7 +1606,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -1693,7 +1694,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
 
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
@@ -1798,7 +1799,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false, private_network_validator),
@@ -1903,7 +1904,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         let exploratory_selector =
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false, private_network_validator);
         let router_ctx = RouterContext::new(
@@ -2198,7 +2199,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         let exploratory_selector =
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false, private_network_validator);
         let router_ctx = RouterContext::new(
@@ -2493,7 +2494,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false, private_network_validator),
@@ -2590,7 +2591,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false, private_network_validator),
@@ -2697,7 +2698,7 @@ mod tests {
         let pool_handle = parameters.context_handle.clone();
         let our_id = router_info.identity.id();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false, private_network_validator),
@@ -2920,7 +2921,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         let (mut tunnel_pool, _handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false, private_network_validator),
@@ -3080,7 +3081,7 @@ mod tests {
         let parameters = TunnelPoolBuildParameters::new(pool_config);
         let pool_handle = parameters.context_handle.clone();
         let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let private_network_validator = PrivateNetworkValidator::new(None);
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
         let (mut tunnel_pool, mut handle) = TunnelPool::<MockRuntime, _>::new(
             parameters,
             ExploratorySelector::new(profile_storage.clone(), pool_handle, false, private_network_validator),
