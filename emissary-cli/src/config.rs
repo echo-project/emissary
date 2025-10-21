@@ -22,7 +22,6 @@ use crate::{
     LOG_TARGET,
 };
 
-use emissary_core::PrivateNetworkConfig;
 use home::home_dir;
 use rand::{rngs::OsRng, thread_rng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -202,6 +201,13 @@ pub struct RouterUiConfig {
     pub port: Option<u16>,
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PrivateNetworkConfig {
+    pub enabled: bool,
+    pub known_relays: Vec<String>,
+    pub min_bandwidth: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct EmissaryConfig {
     #[serde(rename = "address-book")]
@@ -235,6 +241,8 @@ struct EmissaryConfig {
     server_tunnels: Option<Vec<ServerTunnelConfig>>,
     #[serde(rename = "router-ui")]
     router_ui: Option<RouterUiConfig>,
+    #[serde(rename = "private-network")]
+    private_network: Option<PrivateNetworkConfig>,
 }
 
 impl Default for EmissaryConfig {
@@ -304,6 +312,11 @@ impl Default for EmissaryConfig {
             ssu2: None,
             client_tunnels: None,
             server_tunnels: None,
+            private_network: Some(PrivateNetworkConfig {
+                enabled: false,
+                known_relays: vec![],
+                min_bandwidth: Some("O".to_string()),
+            }),
         }
     }
 }
@@ -390,6 +403,9 @@ pub struct Config {
 
     /// Transit tunnel config.
     pub transit: Option<emissary_core::TransitConfig>,
+
+    /// Private network config.
+    pub private_network: Option<emissary_core::PrivateNetworkConfig>,
 }
 
 impl From<Config> for emissary_core::Config {
@@ -413,11 +429,7 @@ impl From<Config> for emissary_core::Config {
             static_key: Some(val.static_key),
             transit: val.transit,
             refresh_interval: val.router_ui.map(|config| config.refresh_interval),
-            private_network: Some(PrivateNetworkConfig {
-                enabled: true,
-                known_relays: vec![],
-                min_bandwidth: Some("O".to_string()),
-            })
+            private_network: val.private_network,
         }
     }
 }
@@ -784,6 +796,11 @@ impl Config {
             transit: config.transit.map(|config| emissary_core::TransitConfig {
                 max_tunnels: config.max_tunnels,
             }),
+            private_network: config.private_network.map(|config| emissary_core::PrivateNetworkConfig {
+                enabled: config.enabled,
+                known_relays: config.known_relays,
+                min_bandwidth: config.min_bandwidth,
+            }),
         })
     }
 
@@ -929,6 +946,11 @@ impl Config {
             static_key,
             transit: config.transit.map(|config| emissary_core::TransitConfig {
                 max_tunnels: config.max_tunnels,
+            }),
+            private_network: config.private_network.map(|config| emissary_core::PrivateNetworkConfig {
+                enabled: config.enabled,
+                known_relays: config.known_relays,
+                min_bandwidth: config.min_bandwidth,
             }),
         })
     }
