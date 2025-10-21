@@ -240,13 +240,15 @@ struct EmissaryConfig {
 impl Default for EmissaryConfig {
     fn default() -> Self {
         Self {
-            address_book: Some(AddressBookConfig {
-                default: Some(String::from(
-                    "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
-                )),
-                subscriptions: None,
-            }),
-            caps: Some(String::from("XR")),
+            net_id: Some(27u8),  //27=echo net
+            address_book: None,
+            // address_book: Some(AddressBookConfig {
+            //     default: Some(String::from(
+            //         "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
+            //     )),
+            //     subscriptions: None,
+            // }),
+            caps: Some(String::from("XfR")), //XfR = Floodfill Router, L = Local Router
             http_proxy: Some(HttpProxyConfig {
                 host: "127.0.0.1".to_string(),
                 port: 4444u16,
@@ -271,11 +273,12 @@ impl Default for EmissaryConfig {
                 host: None,
                 publish: Some(true),
             }),
-            port_forwarding: Some(PortForwardingConfig {
-                nat_pmp: true,
-                upnp: true,
-                name: String::from("emissary"),
-            }),
+            port_forwarding: None,
+            // port_forwarding: Some(PortForwardingConfig {
+            //     nat_pmp: true,
+            //     upnp: true,
+            //     name: String::from("emissary"),
+            // }),
             reseed: Some(ReseedConfig {
                 reseed_threshold: 25usize,
                 hosts: None,
@@ -295,10 +298,9 @@ impl Default for EmissaryConfig {
             }),
             allow_local: false,
             exploratory: None,
-            floodfill: false,
+            floodfill: true,  //true = Floodfill Router, false = Local Router
             insecure_tunnels: false,
             log: None,
-            net_id: None,
             ssu2: None,
             client_tunnels: None,
             server_tunnels: None,
