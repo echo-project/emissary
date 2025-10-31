@@ -159,8 +159,19 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
             "reseed router"
         );
 
+        // match Reseeder::reseed(
+        //     config.reseed.as_ref().and_then(|config| config.hosts.clone()),
+        //     !arguments.reseed.disable_force_ipv4.unwrap_or(false),
+        // )
+        
+        let hosts = if let Some(url) = config.reseed_api_url.as_ref() {
+            Some(vec![url.to_string()])
+        } else {
+            None
+        };
+
         match Reseeder::reseed(
-            config.reseed.as_ref().and_then(|config| config.hosts.clone()),
+            hosts,
             !arguments.reseed.disable_force_ipv4.unwrap_or(false),
         )
         .await

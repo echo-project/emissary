@@ -279,7 +279,7 @@ impl<'a> Su3<'a> {
                 return None;
             }
         }
-
+        
         let temp_dir = TempDir::new().ok()?;
         let mut zip_file = File::create_new(temp_dir.path().join("routers.zip")).ok()?;
         File::write_all(&mut zip_file, su3.content).ok()?;
