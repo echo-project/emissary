@@ -27,7 +27,7 @@ use crate::{
     port_mapper::PortMapper,
     proxy::{http::HttpProxy, socks::SocksProxy},
     storage::RouterStorage,
-    tools::{reseed_api::UpdateRouterInfoRequest, RouterCommand},
+    tools::{reseed_api::{StoreNetdbRequest, UpdateRouterInfoRequest}, RouterCommand},
     tunnel::{client::ClientTunnelManager, server::ServerTunnelManager},
 };
 
@@ -287,11 +287,29 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
                 );
             }
 
+            // Upload router info to backend service
+            let netdb_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, local_router_info.clone());
+            let store_netdb_response = crate::tools::reseed_api::upload_net_db(StoreNetdbRequest {
+                router_id: router_id.to_string(),
+                netdb_data: netdb_b64,
+            })
+            .map_err(|e| Error::Custom(format!("Failed to store netdb data to reseed API: {}", e)))?;
             
+            if store_netdb_response.status == "success" {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "netdb data stored in reseed API",
+                );
+            } else {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    "failed to store netdb data in reseed API",
+                );
+            }
+
         }
     }
 
-    // Upload router info to backend service
 
     // save newest router info to disk
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;
