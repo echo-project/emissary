@@ -1,8 +1,33 @@
 use anyhow::{anyhow, Result};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 
-// const RESEED_HOST_BASE_URL: &str = "http://95.216.98.234:8080";
-const RESEED_HOST_BASE_URL: &str = "http://127.0.0.1:8080";
+// Default reseed API base URL if not provided
+const DEFAULT_RESEED_HOST_BASE_URL: &str = "http://127.0.0.1:8080";
+
+/// Formats a reqwest error with improved diagnostics for connection issues.
+fn format_reqwest_error(e: reqwest::Error, url: &str) -> anyhow::Error {
+    let error_str = e.to_string().to_lowercase();
+    let source_str = e.source().map(|s| s.to_string().to_lowercase()).unwrap_or_default();
+    let combined_str = format!("{} {}", error_str, source_str);
+    
+    let error_msg = if combined_str.contains("connection refused") 
+        || combined_str.contains("connect error")
+        || combined_str.contains("sendrequest")
+        || combined_str.contains("client error")
+        || combined_str.contains("network error")
+        || combined_str.contains("failed to connect") {
+        format!("Connection refused - is the reseed API server running at {}? Make sure the server is started and listening on port 8080. Error: {}", url, e)
+    } else if combined_str.contains("timeout") || combined_str.contains("timed out") {
+        format!("Request timeout - the server at {} did not respond within 30 seconds. Error: {}", url, e)
+    } else if let Some(source) = e.source() {
+        format!("Failed to send request to {}: {} (caused by: {})", url, e, source)
+    } else {
+        format!("Failed to send request to {}: {}", url, e)
+    };
+    anyhow!(error_msg)
+}
 
 /// Response structure for the keys API endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,17 +70,17 @@ pub struct StoreNetdbResponse {
 }
 
 async fn get_static_signing_keys_async() -> Result<StaticSigningKeysResponse> {
-    let client = reqwest::Client::builder()
+    let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/v1/keys", RESEED_HOST_BASE_URL);
+    let url = format!("{}/api/v1/keys", DEFAULT_RESEED_HOST_BASE_URL);
 
     let response = client
         .get(&url)
         .send()
         .await
-        .map_err(|e| anyhow!("Failed to send request to {}: {}", url, e))?;
+        .map_err(|e| format_reqwest_error(e, &url))?;
 
     let status = response.status();
     let response_text = response
@@ -113,19 +138,24 @@ pub fn get_static_signing_keys() -> Result<StaticSigningKeysResponse> {
     }
 }
 
-async fn update_router_id_async(request: UpdateRouterInfoRequest) -> Result<UpdateRouterInfoResponse> {
-    let client = reqwest::Client::builder()
+pub async fn update_router_id_async(request: UpdateRouterInfoRequest, api_url: Option<&str>) -> Result<UpdateRouterInfoResponse> {
+    let base_url = api_url.unwrap_or(DEFAULT_RESEED_HOST_BASE_URL);
+    let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/v1/router-info", RESEED_HOST_BASE_URL);
+    let url = format!("{}/api/v1/router-info", base_url);
 
+    // tracing::info!("request: {:?}", request);
+    
     let response = client
         .post(&url)
         .json(&request)
         .send()
         .await
-        .map_err(|e| anyhow!("Failed to send request to {}: {}", url, e))?;
+        .map_err(|e| format_reqwest_error(e, &url))?;
+
+    // tracing::info!("response: {:?}", response);
 
     let status = response.status();
     let response_text = response
@@ -133,6 +163,7 @@ async fn update_router_id_async(request: UpdateRouterInfoRequest) -> Result<Upda
         .await
         .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
 
+    // tracing::info!("response_text: {:?}", response_text);
     if !status.is_success() {
         // Try to parse error response
         if let Ok(error_json) = serde_json::from_str::<serde_json::Value>(&response_text) {
@@ -154,6 +185,7 @@ async fn update_router_id_async(request: UpdateRouterInfoRequest) -> Result<Upda
     let router_info_response: UpdateRouterInfoResponse = serde_json::from_str(&response_text)
         .map_err(|e| anyhow!("Failed to parse response as JSON: {}", e))?;
 
+    tracing::info!("router_info_response: {:?}", router_info_response);
     Ok(router_info_response)
 }
 
@@ -175,7 +207,8 @@ async fn update_router_id_async(request: UpdateRouterInfoRequest) -> Result<Upda
 /// - The server returns a non-success status code
 /// - The response cannot be parsed as JSON
 /// - The response is missing required fields
-pub fn update_router_id(request: UpdateRouterInfoRequest) -> Result<UpdateRouterInfoResponse> {
+pub fn update_router_id(request: UpdateRouterInfoRequest, api_url: Option<&str>) -> Result<UpdateRouterInfoResponse> {
+    let api_url = api_url.map(|s| s.to_string());
     // Try to use the current tokio runtime handle if available
     match tokio::runtime::Handle::try_current() {
         Ok(_handle) => {
@@ -184,7 +217,7 @@ pub fn update_router_id(request: UpdateRouterInfoRequest) -> Result<UpdateRouter
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new()
                     .expect("Failed to create tokio runtime");
-                rt.block_on(update_router_id_async(request))
+                rt.block_on(update_router_id_async(request, api_url.as_deref()))
             })
             .join()
             .map_err(|_| anyhow!("Thread panicked while updating router ID"))?
@@ -193,24 +226,25 @@ pub fn update_router_id(request: UpdateRouterInfoRequest) -> Result<UpdateRouter
             // No runtime available, create a new one
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| anyhow!("Failed to create tokio runtime: {}", e))?;
-            rt.block_on(update_router_id_async(request))
+            rt.block_on(update_router_id_async(request, api_url.as_deref()))
         }
     }
 }
 
-async fn upload_net_db_async(request: StoreNetdbRequest) -> Result<StoreNetdbResponse> {
-    let client = reqwest::Client::builder()
+async fn upload_net_db_async(request: StoreNetdbRequest, api_url: Option<&str>) -> Result<StoreNetdbResponse> {
+    let base_url = api_url.unwrap_or(DEFAULT_RESEED_HOST_BASE_URL);
+    let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/v1/store-netdb", RESEED_HOST_BASE_URL);
+    let url = format!("{}/api/v1/store-netdb", base_url);
 
     let response = client
         .post(&url)
         .json(&request)
         .send()
         .await
-        .map_err(|e| anyhow!("Failed to send request to {}: {}", url, e))?;
+        .map_err(|e| format_reqwest_error(e, &url))?;
 
     let status = response.status();
     let response_text = response
@@ -259,7 +293,8 @@ async fn upload_net_db_async(request: StoreNetdbRequest) -> Result<StoreNetdbRes
 /// - The server returns a non-success status code
 /// - The response cannot be parsed as JSON
 /// - The response is missing required fields
-pub fn upload_net_db(request: StoreNetdbRequest) -> Result<StoreNetdbResponse> {
+pub fn upload_net_db(request: StoreNetdbRequest, api_url: Option<&str>) -> Result<StoreNetdbResponse> {
+    let api_url = api_url.map(|s| s.to_string());
     // Try to use the current tokio runtime handle if available
     match tokio::runtime::Handle::try_current() {
         Ok(_handle) => {
@@ -268,7 +303,7 @@ pub fn upload_net_db(request: StoreNetdbRequest) -> Result<StoreNetdbResponse> {
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new()
                     .expect("Failed to create tokio runtime");
-                rt.block_on(upload_net_db_async(request))
+                rt.block_on(upload_net_db_async(request, api_url.as_deref()))
             })
             .join()
             .map_err(|_| anyhow!("Thread panicked while uploading netdb data"))?
@@ -277,7 +312,7 @@ pub fn upload_net_db(request: StoreNetdbRequest) -> Result<StoreNetdbResponse> {
             // No runtime available, create a new one
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| anyhow!("Failed to create tokio runtime: {}", e))?;
-            rt.block_on(upload_net_db_async(request))
+            rt.block_on(upload_net_db_async(request, api_url.as_deref()))
         }
     }
 }

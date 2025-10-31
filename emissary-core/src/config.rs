@@ -213,4 +213,8 @@ pub struct Config {
     ///
     /// `None` if private network mode is disabled.
     pub private_network: Option<PrivateNetworkConfig>,
+
+    /// Optional reseed API server URL for private network mode.
+    /// If not provided, API calls to update router info are skipped.
+    pub reseed_api_url: Option<String>,
 }

@@ -38,7 +38,7 @@ flate2 = { workspace = true }
 parking_lot = { workspace = true }
 rand_core = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "http2"] }
 smol = { workspace = true }
 tokio-util = { workspace = true }
 tokio = { workspace = true }

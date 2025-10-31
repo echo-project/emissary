@@ -244,6 +244,8 @@ struct EmissaryConfig {
     router_ui: Option<RouterUiConfig>,
     #[serde(rename = "private-network")]
     private_network: Option<PrivateNetworkConfig>,
+    #[serde(rename = "reseed-api-url")]
+    reseed_api_url: Option<String>,
 }
 
 impl Default for EmissaryConfig {
@@ -318,6 +320,7 @@ impl Default for EmissaryConfig {
                 known_relays: vec![],
                 min_bandwidth: Some("O".to_string()),
             }),
+            reseed_api_url: None,
         }
     }
 }
@@ -407,6 +410,10 @@ pub struct Config {
 
     /// Private network config.
     pub private_network: Option<emissary_core::PrivateNetworkConfig>,
+
+    /// Optional reseed API server URL for private network mode.
+    /// If not provided, API calls to update router info are skipped.
+    pub reseed_api_url: Option<String>,
 }
 
 impl From<Config> for emissary_core::Config {
@@ -431,6 +438,7 @@ impl From<Config> for emissary_core::Config {
             transit: val.transit,
             refresh_interval: val.router_ui.map(|config| config.refresh_interval),
             private_network: val.private_network,
+            reseed_api_url: val.reseed_api_url,
         }
     }
 }
@@ -831,6 +839,7 @@ impl Config {
                 known_relays: config.known_relays,
                 min_bandwidth: config.min_bandwidth,
             }),
+            reseed_api_url: config.reseed_api_url,
         })
     }
 
@@ -982,6 +991,7 @@ impl Config {
                 known_relays: config.known_relays,
                 min_bandwidth: config.min_bandwidth,
             }),
+            reseed_api_url: config.reseed_api_url,
         })
     }
 
@@ -1330,10 +1340,6 @@ mod tests {
             base_path: None,
             command: None,
             log: None,
-            #[cfg(any(
-                all(feature = "native-ui", not(feature = "web-ui")),
-                all(not(feature = "native-ui"), feature = "web-ui")
-            ))]
             router_ui: crate::cli::RouterUiOptions {
                 disable_ui: None,
                 refresh_interval: None,

@@ -219,6 +219,7 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
     let server_tunnels = mem::take(&mut config.server_tunnels);
     let router_ui_config = config.router_ui.clone();
     let private_network_config = config.private_network.clone();
+    let reseed_api_url = config.reseed_api_url.clone();
 
     let static_key = config.static_key.clone();
     let signing_key = config.signing_key.clone();
@@ -256,57 +257,91 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
                 "private network mode is disabled, skipping router id update and router info upload",
             );
         } else {
-            // Update router id at backend service
-
-            let router_info = RouterInfo::parse(&local_router_info.clone()).unwrap();
-            let router_identity = router_info.identity.clone();
-            
-            let router_id = router_identity.id();
-            let padding = router_identity.padding();
-            let static_key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, static_key);
-            let signing_key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, signing_key);
-            let padding_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, padding);
-
-            let update_router_id_response = crate::tools::reseed_api::update_router_id(UpdateRouterInfoRequest {
-                static_key: static_key_b64,
-                signing_key: signing_key_b64,
-                padding: padding_b64,
-                router_id: router_id.to_string(),
-            })
-            .map_err(|e| Error::Custom(format!("Failed to store router_id to reseed API: {}", e)))?;
-            
-            if update_router_id_response.status == "success" {  
+            // Update router id at backend service (only if API URL is configured)
+            if let Some(api_url) = reseed_api_url.as_ref() {
                 tracing::info!(
                     target: LOG_TARGET,
-                        "router_id stored in reseed API",
+                    api_url = api_url,
+                    "updating router ID at reseed API",
                 );
-            } else {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    "failed to store router_id in reseed API",
-                );
-            }
+                let router_info = RouterInfo::parse(&local_router_info.clone()).unwrap();
 
-            // Upload router info to backend service
-            let netdb_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, local_router_info.clone());
-            let store_netdb_response = crate::tools::reseed_api::upload_net_db(StoreNetdbRequest {
-                router_id: router_id.to_string(),
-                netdb_data: netdb_b64,
-            })
-            .map_err(|e| Error::Custom(format!("Failed to store netdb data to reseed API: {}", e)))?;
-            
-            if store_netdb_response.status == "success" {
+                let router_id = emissary_core::crypto::base64_encode(router_info.identity.hash());
+                let padding = router_info.identity.padding();
+                let static_key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, static_key);
+                let signing_key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, signing_key);
+                let padding_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, padding);
+
+                // println!("static_key_b64: {}", static_key_b64);
+                // println!("signing_key_b64: {}", signing_key_b64);
+                // println!("padding_b64: {}", padding_b64);
+                // println!("router_id: {}", router_id);
+
+                match crate::tools::reseed_api::update_router_id_async(UpdateRouterInfoRequest {
+                    static_key: static_key_b64,
+                    signing_key: signing_key_b64,
+                    padding: padding_b64,
+                    router_id: router_id.to_string(),
+                }, Some(api_url)).await {
+                    Ok(update_router_id_response) => {
+                        if update_router_id_response.status == "updated" {
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                router_id = ?update_router_id_response.router_id,
+                                "router_id stored in reseed API",
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                status = ?update_router_id_response.status,
+                                "unexpected status when storing router_id",
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            error = ?e,
+                            "failed to store router_id to reseed API, continuing anyway",
+                        );
+                    }
+                }
+
+                // Upload router info to backend service
+                let netdb_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, local_router_info.clone());
+                match crate::tools::reseed_api::upload_net_db(StoreNetdbRequest {
+                    router_id: router_id.to_string(),
+                    netdb_data: netdb_b64,
+                }, Some(api_url)) {
+                    Ok(store_netdb_response) => {
+                        if store_netdb_response.status == "stored" {
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                router_id = ?store_netdb_response.router_id,
+                                "netdb data stored in reseed API",
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                status = ?store_netdb_response.status,
+                                "unexpected status when storing netdb data",
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            error = ?e,
+                            "failed to store netdb data to reseed API, continuing anyway",
+                        );
+                    }
+                }
+            } else {
                 tracing::info!(
                     target: LOG_TARGET,
-                    "netdb data stored in reseed API",
-                );
-            } else {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    "failed to store netdb data in reseed API",
+                    "reseed_api_url not configured, skipping router ID update",
                 );
             }
-
         }
     }
 
