@@ -187,6 +187,7 @@ impl<R: Runtime> Router<R> {
             &local_signing_key,
             config.transit.is_none(),
         );
+
         let Config {
             i2cp_config,
             samv3_config,

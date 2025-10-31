@@ -29,6 +29,7 @@ thiserror = "2.0.12"
 tokio-tungstenite = { version = "0.27.0", default-features = false, features = ["native-tls"], optional = true }
 toml = "0.8.23"
 url = "2.5.4"
+base64 = "0.21"
 
 # workspace dependencies
 anyhow = { workspace = true }
@@ -37,7 +38,7 @@ flate2 = { workspace = true }
 parking_lot = { workspace = true }
 rand_core = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 smol = { workspace = true }
 tokio-util = { workspace = true }
 tokio = { workspace = true }

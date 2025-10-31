@@ -27,13 +27,13 @@ use crate::{
     port_mapper::PortMapper,
     proxy::{http::HttpProxy, socks::SocksProxy},
     storage::RouterStorage,
-    tools::RouterCommand,
+    tools::{reseed_api::UpdateRouterInfoRequest, RouterCommand},
     tunnel::{client::ClientTunnelManager, server::ServerTunnelManager},
 };
 
 use anyhow::anyhow;
 use clap::Parser;
-use emissary_core::{events::EventSubscriber, router::Router};
+use emissary_core::{events::EventSubscriber, primitives::{RouterIdentity, RouterInfo}, router::Router};
 use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
 use futures::{channel::oneshot, StreamExt};
 use tokio::sync::mpsc::{channel, Receiver};
@@ -218,6 +218,10 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
     let client_tunnels = mem::take(&mut config.client_tunnels);
     let server_tunnels = mem::take(&mut config.server_tunnels);
     let router_ui_config = config.router_ui.clone();
+    let private_network_config = config.private_network.clone();
+
+    let static_key = config.static_key.clone();
+    let signing_key = config.signing_key.clone();
 
     let (router, events, local_router_info, address_book_manager) =
         match config.address_book.take() {
@@ -243,6 +247,51 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
             }
         }
         .map_err(|error| anyhow!(error))?;
+
+    
+    if let Some(private_network_config) = private_network_config {
+        if !private_network_config.enabled {
+            tracing::info!(
+                target: LOG_TARGET,
+                "private network mode is disabled, skipping router id update and router info upload",
+            );
+        } else {
+            // Update router id at backend service
+
+            let router_info = RouterInfo::parse(&local_router_info.clone()).unwrap();
+            let router_identity = router_info.identity.clone();
+            
+            let router_id = router_identity.id();
+            let padding = router_identity.padding();
+            let static_key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, static_key);
+            let signing_key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, signing_key);
+            let padding_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, padding);
+
+            let update_router_id_response = crate::tools::reseed_api::update_router_id(UpdateRouterInfoRequest {
+                static_key: static_key_b64,
+                signing_key: signing_key_b64,
+                padding: padding_b64,
+                router_id: router_id.to_string(),
+            })
+            .map_err(|e| Error::Custom(format!("Failed to store router_id to reseed API: {}", e)))?;
+            
+            if update_router_id_response.status == "success" {  
+                tracing::info!(
+                    target: LOG_TARGET,
+                        "router_id stored in reseed API",
+                );
+            } else {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    "failed to store router_id in reseed API",
+                );
+            }
+
+            
+        }
+    }
+
+    // Upload router info to backend service
 
     // save newest router info to disk
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;

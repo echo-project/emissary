@@ -22,6 +22,7 @@ use crate::{
     LOG_TARGET,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use home::home_dir;
 use rand::{rngs::OsRng, thread_rng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -476,30 +477,59 @@ impl Config {
             Config::create_profiles_dir(path.join("peerProfiles"))?;
         }
 
-        // read static & signing keys from disk or generate new ones
-        let static_key = match Self::load_key(path.clone(), "static") {
-            Ok(key) => x25519_dalek::StaticSecret::from(key).to_bytes(),
-            Err(error) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    error = %error.to_string(),
-                    "failed to load static key, regenerating",
-                );
-
-                Self::create_static_key(path.clone())?
+        // read static & signing keys from disk or fetch from API
+        let (static_key, api_keys) = match Self::load_key(path.clone(), "static") {
+            Ok(key) => {
+                // Static key exists on disk, use it
+                (x25519_dalek::StaticSecret::from(key).to_bytes(), None)
+            }
+            Err(_) => {
+                // Static key doesn't exist, fetch both keys from API
+                let api_response = crate::tools::reseed_api::get_static_signing_keys()
+                    .map_err(|e| Error::Custom(format!("Failed to fetch keys from reseed API: {}", e)))?;
+                
+                // Decode static key from API
+                let static_key_decoded = STANDARD
+                    .decode(&api_response.static_key)
+                    .map_err(|e| Error::Custom(format!("Failed to decode static key from API: {}", e)))?;
+                
+                let static_key = static_key_decoded
+                    .try_into()
+                    .map_err(|_| Error::Custom("Static key from API has invalid length".to_string()))?;
+                
+                Self::save_key(path.clone(), "static", &static_key)?;
+                (static_key, Some(api_response))
             }
         };
 
-        let signing_key = match Self::load_key(path.clone(), "signing") {
-            Ok(key) => ed25519_dalek::SigningKey::from(key).to_bytes(),
-            Err(error) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    error = %error.to_string(),
-                    "failed to load signing key, regenerating",
-                );
-
-                Self::create_signing_key(path.clone())?
+        let signing_key = match &api_keys {
+            Some(keys) => {
+                // Use signing key from API
+                let signing_key_decoded = STANDARD
+                    .decode(&keys.signing_key)
+                    .map_err(|e| Error::Custom(format!("Failed to decode signing key from API: {}", e)))?;
+                
+                let signing_key = signing_key_decoded
+                    .try_into()
+                    .map_err(|_| Error::Custom("Signing key from API has invalid length".to_string()))?;
+                
+                Self::save_key(path.clone(), "signing", &signing_key)?;
+                signing_key
+            }
+            None => {
+                // Try to load signing key from disk
+                match Self::load_key(path.clone(), "signing") {
+                    Ok(key) => ed25519_dalek::SigningKey::from(key).to_bytes(),
+                    Err(error) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            error = %error.to_string(),
+                            "failed to load signing key, regenerating",
+                        );
+        
+                        Self::create_signing_key(path.clone())?
+                    }
+                }
             }
         };
 

@@ -19,6 +19,7 @@
 use clap::{ArgGroup, Subcommand};
 
 pub mod base64;
+pub mod reseed_api;
 
 /// Router commands.
 ///
