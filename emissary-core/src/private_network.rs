@@ -259,6 +259,12 @@ impl PrivateNetworkValidator {
                     })
             })
             .collect::<HashSet<_>>();
+
+        tracing::info!(
+            target: LOG_TARGET,
+            known_relays_count = self.known_relays.len(),
+            "updated known relay list"
+        );
     }
 }
 
