@@ -69,6 +69,13 @@ pub struct StoreNetdbResponse {
     pub netdb_data: String,
 }
 
+/// Response structure for the relay-routers API endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayRoutersResponse {
+    pub relay_routers: Vec<String>,
+    pub count: usize,
+}
+
 async fn get_static_signing_keys_async() -> Result<StaticSigningKeysResponse> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -316,3 +323,89 @@ pub fn upload_net_db(request: StoreNetdbRequest, api_url: Option<&str>) -> Resul
         }
     }
 }
+
+pub async fn get_relay_routers_async(api_url: Option<&str>) -> Result<RelayRoutersResponse> {
+    let base_url = api_url.unwrap_or(DEFAULT_RESEED_HOST_BASE_URL);
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = format!("{}/api/v1/relay-routers", base_url);
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format_reqwest_error(e, &url))?;
+
+    let status = response.status();
+    let response_text = response
+        .text()
+        .await
+        .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
+
+    if !status.is_success() {
+        // Try to parse error response
+        if let Ok(error_json) = serde_json::from_str::<serde_json::Value>(&response_text) {
+            if let Some(error_msg) = error_json.get("error").and_then(|v| v.as_str()) {
+                return Err(anyhow!(
+                    "Server returned error status {}: {}",
+                    status,
+                    error_msg
+                ));
+            }
+        }
+        return Err(anyhow!(
+            "Server returned error status {}: {}",
+            status,
+            response_text
+        ));
+    }
+
+    let relay_routers_response: RelayRoutersResponse = serde_json::from_str(&response_text)
+        .map_err(|e| anyhow!("Failed to parse response as JSON: {}", e))?;
+
+    Ok(relay_routers_response)
+}
+
+/// Fetches relay routers from the reseed API server.
+///
+/// Makes a GET request to `/api/v1/relay-routers` endpoint and returns the list of relay routers.
+/// This is a synchronous function that internally uses a tokio runtime to perform
+/// the HTTP request.
+///
+/// # Arguments
+///
+/// * `api_url` - Optional API base URL. If not provided, defaults to `http://127.0.0.1:8080`
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The HTTP request fails
+/// - The server returns a non-success status code
+/// - The response cannot be parsed as JSON
+/// - The response is missing required fields
+pub fn get_relay_routers(api_url: Option<&str>) -> Result<RelayRoutersResponse> {
+    let api_url = api_url.map(|s| s.to_string());
+    // Try to use the current tokio runtime handle if available
+    match tokio::runtime::Handle::try_current() {
+        Ok(_handle) => {
+            // We're already in a tokio runtime, so we can't use block_on directly.
+            // Instead, spawn a new thread with its own runtime to avoid conflicts.
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new()
+                    .expect("Failed to create tokio runtime");
+                rt.block_on(get_relay_routers_async(api_url.as_deref()))
+            })
+            .join()
+            .map_err(|_| anyhow!("Thread panicked while fetching relay routers"))?
+        }
+        Err(_) => {
+            // No runtime available, create a new one
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| anyhow!("Failed to create tokio runtime: {}", e))?;
+            rt.block_on(get_relay_routers_async(api_url.as_deref()))
+        }
+    }
+}
+

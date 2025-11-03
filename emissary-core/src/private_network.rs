@@ -238,6 +238,28 @@ impl PrivateNetworkValidator {
     pub fn known_relay_count(&self) -> usize {
         self.known_relays.len()
     }
+
+    /// Update the list of known relay router IDs.
+    pub fn update_relay_list(&mut self, relay_list: Vec<String>) {
+        if !self.enabled {
+            return;
+        }
+
+        self.known_relays = relay_list.iter()
+            .filter_map(|relay_str| {
+                base64_decode(relay_str.as_bytes())
+                    .and_then(|bytes| {
+                        if bytes.len() == 32 {
+                            let mut router_id = [0u8; 32];
+                            router_id.copy_from_slice(&bytes);
+                            Some(RouterId::from(router_id))
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect::<HashSet<_>>();
+    }
 }
 
 #[cfg(test)]

@@ -135,6 +135,11 @@ pub struct Router<R: Runtime> {
 
     /// Handle to [`TunnelManager`].
     _tunnel_manager_handle: TunnelManagerHandle,
+
+    /// Private network validator.
+    ///
+    /// Used to validate private network connections.
+    private_network_validator: StdArc<Mutex<PrivateNetworkValidator>>,
 }
 
 impl<R: Runtime> Router<R> {
@@ -328,7 +333,7 @@ impl<R: Runtime> Router<R> {
                 exploratory_pool_handle,
                 routing_table,
                 netdb_msg_rx,
-                private_network_validator
+                private_network_validator.clone()
             );
 
             R::spawn(netdb);
@@ -423,6 +428,7 @@ impl<R: Runtime> Router<R> {
                 shutdown_count: 0usize,
                 transport_manager: transport_manager_builder.build(),
                 _tunnel_manager_handle: tunnel_manager_handle,
+                private_network_validator: private_network_validator,
             },
             event_subscriber,
             serialized_router_info,
@@ -466,6 +472,10 @@ impl<R: Runtime> Router<R> {
     /// a warning is logged.
     pub fn add_external_address(&mut self, address: Ipv4Addr) {
         self.transport_manager.add_external_address(address);
+    }
+
+    pub fn update_relay_list(&self, relay_list: Vec<String>) {
+        self.private_network_validator.lock().unwrap().update_relay_list(relay_list);
     }
 }
 
