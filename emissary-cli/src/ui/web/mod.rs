@@ -154,7 +154,7 @@ impl RouterUi {
 
     /// Run the event loop of [`RouterUi`].
     pub async fn run(mut self) {
-        let listener = match TcpListener::bind(format!("127.0.0.1:{}", self.port)).await {
+        let listener = match TcpListener::bind(format!("0.0.0.0:{}", self.port)).await {
             Ok(listener) => listener,
             Err(error) => {
                 tracing::warn!(
