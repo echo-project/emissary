@@ -18,7 +18,6 @@
 
 use crate::config::PortForwardingConfig;
 
-use futures::FutureExt;
 use igd_next::{
     aio::{
         tokio::{search_gateway, Tokio},
@@ -29,8 +28,6 @@ use igd_next::{
 use tokio::sync::{mpsc, oneshot};
 
 use std::{
-    fmt::Debug,
-    future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -88,31 +85,6 @@ impl PortMapper {
         }
     }
 
-    /// Attempt to execute `future` with with retries and timeout.
-    ///
-    /// If the future fails after `NUM_RETRIES` many retries, either due to error or timeout, the
-    /// function returns `None` which the caller should consider as fatal failure.
-    async fn with_retries_and_timeout<T, E: Debug>(
-        mut future: impl Future<Output = Result<T, E>> + Unpin,
-    ) -> Result<T, ()> {
-        for _ in 0..NUM_RETRIES {
-            match tokio::time::timeout(RESPONSE_TIMEOUT, &mut future).await {
-                Err(_) => tracing::debug!(
-                    target: LOG_TARGET,
-                    "operation timed out",
-                ),
-                Ok(Err(error)) => tracing::debug!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "operation failed",
-                ),
-                Ok(Ok(res)) => return Ok(res),
-            }
-        }
-
-        Err(())
-    }
-
     /// Attempt to map NTCP2 port.
     ///
     /// Returns `Err(())` if the operation failed after multiple retries and `Ok(None)` if NTCP2 is
@@ -125,30 +97,42 @@ impl PortMapper {
         let Some(ntcp2_port) = self.ntcp2_port else {
             return Ok(None);
         };
-        let address = SocketAddr::new(address, ntcp2_port);
+        let socket_addr = SocketAddr::new(address, ntcp2_port);
+        let config_name = &self.config.name;
 
         tracing::trace!(
             target: LOG_TARGET,
-            ?address,
+            ?socket_addr,
             "map ntcp2 port",
         );
 
-        Self::with_retries_and_timeout(
-            async {
+        for _ in 0..NUM_RETRIES {
+            let mut future = Box::pin(async {
                 gateway
                     .add_port(
                         PortMappingProtocol::TCP,
                         ntcp2_port,
-                        address,
+                        socket_addr,
                         0,
-                        &self.config.name,
+                        config_name,
                     )
                     .await
+            });
+            match tokio::time::timeout(RESPONSE_TIMEOUT, future.as_mut()).await {
+                Err(_) => tracing::debug!(
+                    target: LOG_TARGET,
+                    "operation timed out",
+                ),
+                Ok(Err(error)) => tracing::debug!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "operation failed",
+                ),
+                Ok(Ok(res)) => return Ok(Some(res)),
             }
-            .boxed(),
-        )
-        .await
-        .map(Some)
+        }
+
+        Err(())
     }
 
     /// Attempt to map SSU2 port.
@@ -163,30 +147,42 @@ impl PortMapper {
         let Some(ssu2_port) = self.ssu2_port else {
             return Ok(None);
         };
-        let address = SocketAddr::new(address, ssu2_port);
+        let socket_addr = SocketAddr::new(address, ssu2_port);
+        let config_name = &self.config.name;
 
         tracing::trace!(
             target: LOG_TARGET,
-            ?address,
+            ?socket_addr,
             "map ssu2 port",
         );
 
-        Self::with_retries_and_timeout(
-            async {
+        for _ in 0..NUM_RETRIES {
+            let mut future = Box::pin(async {
                 gateway
                     .add_port(
                         PortMappingProtocol::UDP,
                         ssu2_port,
-                        address,
+                        socket_addr,
                         0,
-                        &self.config.name,
+                        config_name,
                     )
                     .await
+            });
+            match tokio::time::timeout(RESPONSE_TIMEOUT, future.as_mut()).await {
+                Err(_) => tracing::debug!(
+                    target: LOG_TARGET,
+                    "operation timed out",
+                ),
+                Ok(Err(error)) => tracing::debug!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "operation failed",
+                ),
+                Ok(Ok(res)) => return Ok(Some(res)),
             }
-            .boxed(),
-        )
-        .await
-        .map(Some)
+        }
+
+        Err(())
     }
 
     /// Run the event loop of UPnP [`PortMapper`].
@@ -226,10 +222,29 @@ impl PortMapper {
             Ok(Some(())) => {}
         }
 
-        let mut external_address =
-            match Self::with_retries_and_timeout(async { gateway.get_external_ip().await }.boxed())
-                .await
-            {
+        let mut external_address = {
+            let mut result = Err(());
+            for _ in 0..NUM_RETRIES {
+                let mut future = Box::pin(async {
+                    gateway.get_external_ip().await
+                });
+                match tokio::time::timeout(RESPONSE_TIMEOUT, future.as_mut()).await {
+                    Err(_) => tracing::debug!(
+                        target: LOG_TARGET,
+                        "operation timed out",
+                    ),
+                    Ok(Err(error)) => tracing::debug!(
+                        target: LOG_TARGET,
+                        ?error,
+                        "operation failed",
+                    ),
+                    Ok(Ok(address)) => {
+                        result = Ok(address);
+                        break;
+                    }
+                }
+            }
+            match result {
                 Err(()) => {
                     tracing::warn!(
                         target: LOG_TARGET,
@@ -251,7 +266,8 @@ impl PortMapper {
                         None
                     }
                 },
-            };
+            }
+        };
 
         let mut address_timer = Box::pin(tokio::time::sleep(ADDRESS_REFRESH_TIMER));
 
@@ -296,9 +312,28 @@ impl PortMapper {
                     }
                 },
                 _ = &mut address_timer => {
-                    match Self::with_retries_and_timeout(async { gateway.get_external_ip().await }.boxed())
-                        .await
-                    {
+                    let mut result = Err(());
+                    for _ in 0..NUM_RETRIES {
+                        let mut future = Box::pin(async {
+                            gateway.get_external_ip().await
+                        });
+                        match tokio::time::timeout(RESPONSE_TIMEOUT, future.as_mut()).await {
+                            Err(_) => tracing::debug!(
+                                target: LOG_TARGET,
+                                "operation timed out",
+                            ),
+                            Ok(Err(error)) => tracing::debug!(
+                                target: LOG_TARGET,
+                                ?error,
+                                "operation failed",
+                            ),
+                            Ok(Ok(address)) => {
+                                result = Ok(address);
+                                break;
+                            }
+                        }
+                    }
+                    match result {
                         Err(()) => tracing::warn!(
                             target: LOG_TARGET,
                             "failed to fetch external address",

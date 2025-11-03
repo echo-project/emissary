@@ -25,7 +25,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
-use std::{future::Future, net::Ipv4Addr, time::Duration};
+use std::{net::Ipv4Addr, pin::Pin, time::Duration};
 
 /// Logging target for the file
 const LOG_TARGET: &str = "emissary::port-mapper::nat-pmp";
@@ -90,9 +90,10 @@ impl PortMapper {
     /// If the future fails after `NUM_RETRIES` many retries, either due to error or timeout, the
     /// function returns `None` which the caller should consider as fatal failure.
     async fn with_retries_and_timeout<T>(
-        mut future: impl Future<Output = natpmp::Result<T>> + Unpin,
+        mut make_future: impl FnMut() -> Pin<Box<dyn std::future::Future<Output = natpmp::Result<T>> + Send>>,
     ) -> Result<T, ()> {
         for _ in 0..NUM_RETRIES {
+            let mut future = make_future();
             match tokio::time::timeout(RESPONSE_TIMEOUT, &mut future).await {
                 Err(_) => tracing::debug!(
                     target: LOG_TARGET,
@@ -109,6 +110,7 @@ impl PortMapper {
 
         Err(())
     }
+
 
     /// If NAT-PMP initialization failed, attempt to use UPnP as a backup if it was enabled.
     ///
@@ -155,8 +157,8 @@ impl PortMapper {
             "map ntcp2 port",
         );
 
-        Self::with_retries_and_timeout(
-            async {
+        for _ in 0..NUM_RETRIES {
+            let mut future = Box::pin(async {
                 client
                     .send_port_mapping_request(
                         Protocol::TCP,
@@ -166,11 +168,22 @@ impl PortMapper {
                     )
                     .await?;
                 client.read_response_or_retry().await
+            });
+            match tokio::time::timeout(RESPONSE_TIMEOUT, future.as_mut()).await {
+                Err(_) => tracing::debug!(
+                    target: LOG_TARGET,
+                    "operation timed out",
+                ),
+                Ok(Err(error)) => tracing::debug!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "operation failed",
+                ),
+                Ok(Ok(res)) => return Ok(Some(res)),
             }
-            .boxed(),
-        )
-        .await
-        .map(Some)
+        }
+
+        Err(())
     }
 
     /// Attempt to map SSU2 port.
@@ -188,8 +201,8 @@ impl PortMapper {
             "map ssu2 port",
         );
 
-        Self::with_retries_and_timeout(
-            async {
+        for _ in 0..NUM_RETRIES {
+            let mut future = Box::pin(async {
                 client
                     .send_port_mapping_request(
                         Protocol::TCP,
@@ -199,41 +212,65 @@ impl PortMapper {
                     )
                     .await?;
                 client.read_response_or_retry().await
+            });
+            match tokio::time::timeout(RESPONSE_TIMEOUT, future.as_mut()).await {
+                Err(_) => tracing::debug!(
+                    target: LOG_TARGET,
+                    "operation timed out",
+                ),
+                Ok(Err(error)) => tracing::debug!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "operation failed",
+                ),
+                Ok(Ok(res)) => return Ok(Some(res)),
             }
-            .boxed(),
-        )
-        .await
-        .map(Some)
+        }
+
+        Err(())
     }
 
     /// Attempt to fetch external address of the router.
     async fn try_get_external_address(
         client: &mut NatpmpAsync<UdpSocket>,
     ) -> Result<Option<Ipv4Addr>, ()> {
-        Self::with_retries_and_timeout(
-            async {
+        for _ in 0..NUM_RETRIES {
+            let mut future = Box::pin(async {
                 client.send_public_address_request().await?;
                 client.read_response_or_retry().await
-            }
-            .boxed(),
-        )
-        .await
-        .map(|result| match result {
-            Response::Gateway(response) => Some(*response.public_address()),
-            response => {
-                tracing::warn!(
+            });
+            match tokio::time::timeout(RESPONSE_TIMEOUT, future.as_mut()).await {
+                Err(_) => tracing::debug!(
                     target: LOG_TARGET,
-                    ?response,
-                    "ignoring unexpected response",
-                );
-                None
+                    "operation timed out",
+                ),
+                Ok(Err(error)) => tracing::debug!(
+                    target: LOG_TARGET,
+                    ?error,
+                    "operation failed",
+                ),
+                Ok(Ok(result)) => {
+                    return Ok(match result {
+                        Response::Gateway(response) => Some(*response.public_address()),
+                        response => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                ?response,
+                                "ignoring unexpected response",
+                            );
+                            None
+                        }
+                    });
+                }
             }
-        })
+        }
+
+        Err(())
     }
 
     /// Run the event loop of NAT-PMP [`PortMapper`].
     pub async fn run(mut self) {
-        let Ok(mut client) = Self::with_retries_and_timeout(new_tokio_natpmp().boxed()).await
+        let Ok(mut client) = Self::with_retries_and_timeout(|| new_tokio_natpmp().boxed()).await
         else {
             return self.try_switch_to_upnp();
         };
