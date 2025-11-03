@@ -88,7 +88,7 @@ impl From<emissary_core::Profile> for Profile {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct ExploratoryConfig {
     inbound_len: Option<usize>,
     inbound_count: Option<usize>,
@@ -96,59 +96,59 @@ struct ExploratoryConfig {
     outbound_count: Option<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Ntcp2Config {
     port: u16,
     host: Option<Ipv4Addr>,
     publish: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Ssu2Config {
     port: u16,
     host: Option<Ipv4Addr>,
     publish: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct I2cpConfig {
     port: u16,
     host: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SamConfig {
     tcp_port: u16,
     udp_port: u16,
     host: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReseedConfig {
     pub hosts: Option<Vec<String>>,
     pub reseed_threshold: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HttpProxyConfig {
     pub port: u16,
     pub host: String,
     pub outproxy: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SocksProxyConfig {
     pub port: u16,
     pub host: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AddressBookConfig {
     pub default: Option<String>,
     pub subscriptions: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClientTunnelConfig {
     pub name: String,
     pub address: Option<String>,
@@ -157,24 +157,24 @@ pub struct ClientTunnelConfig {
     pub destination_port: Option<u16>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServerTunnelConfig {
     pub name: String,
     pub port: u16,
     pub destination_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransitConfig {
     pub max_tunnels: Option<usize>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct MetricsConfig {
     port: u16,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct PortForwardingConfig {
     pub nat_pmp: bool,
     pub upnp: bool,
@@ -209,7 +209,7 @@ pub struct PrivateNetworkConfig {
     pub min_bandwidth: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct EmissaryConfig {
     #[serde(rename = "address-book")]
     address_book: Option<AddressBookConfig>,
@@ -485,6 +485,13 @@ impl Config {
             Config::create_profiles_dir(path.join("peerProfiles"))?;
         }
 
+        let router_config = match Self::load_router_config(path.clone()) {
+            Err(Error::InvalidData) if arguments.overwrite_config.unwrap_or(false) => None,
+            Err(Error::InvalidData) => return Err(Error::InvalidData),
+            Err(_) => None,
+            Ok(config) => Some(config),
+        };
+
         // read static & signing keys from disk or fetch from API
         let (static_key, api_keys) = match Self::load_key(path.clone(), "static") {
             Ok(key) => {
@@ -492,8 +499,10 @@ impl Config {
                 (x25519_dalek::StaticSecret::from(key).to_bytes(), None)
             }
             Err(_) => {
+                let router_config_clone = router_config.clone();
+                let reseed_api_url = router_config_clone.unwrap().reseed_api_url.clone();
                 // Static key doesn't exist, fetch both keys from API
-                let api_response = crate::tools::reseed_api::get_static_signing_keys()
+                let api_response = crate::tools::reseed_api::get_static_signing_keys(reseed_api_url.as_deref())
                     .map_err(|e| Error::Custom(format!("Failed to fetch keys from reseed API: {}", e)))?;
                 
                 // Decode static key from API
@@ -574,12 +583,7 @@ impl Config {
         //
         // if the option hasn't been passed, exit early and allow user to take a copy of their
         // config before generating a new config
-        let router_config = match Self::load_router_config(path.clone()) {
-            Err(Error::InvalidData) if arguments.overwrite_config.unwrap_or(false) => None,
-            Err(Error::InvalidData) => return Err(Error::InvalidData),
-            Err(_) => None,
-            Ok(config) => Some(config),
-        };
+        
         let router_info = Self::load_router_info(path.clone()).ok();
 
         let mut config = Config::new(

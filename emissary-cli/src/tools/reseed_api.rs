@@ -76,12 +76,12 @@ pub struct RelayRoutersResponse {
     pub count: usize,
 }
 
-async fn get_static_signing_keys_async() -> Result<StaticSigningKeysResponse> {
+async fn get_static_signing_keys_async(api_url: Option<&str>) -> Result<StaticSigningKeysResponse> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/v1/keys", DEFAULT_RESEED_HOST_BASE_URL);
+    let url = format!("{}/api/v1/keys", api_url.unwrap_or(DEFAULT_RESEED_HOST_BASE_URL));
 
     let response = client
         .get(&url)
@@ -122,7 +122,8 @@ async fn get_static_signing_keys_async() -> Result<StaticSigningKeysResponse> {
 /// - The server returns a non-success status code
 /// - The response cannot be parsed as JSON
 /// - The response is missing required fields
-pub fn get_static_signing_keys() -> Result<StaticSigningKeysResponse> {
+pub fn get_static_signing_keys(api_url: Option<&str>) -> Result<StaticSigningKeysResponse> {
+    let api_url = api_url.map(|s| s.to_string());
     // Try to use the current tokio runtime handle if available
     match tokio::runtime::Handle::try_current() {
         Ok(_handle) => {
@@ -131,7 +132,7 @@ pub fn get_static_signing_keys() -> Result<StaticSigningKeysResponse> {
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new()
                     .expect("Failed to create tokio runtime");
-                rt.block_on(get_static_signing_keys_async())
+                rt.block_on(get_static_signing_keys_async(api_url.as_deref()))
             })
             .join()
             .map_err(|_| anyhow!("Thread panicked while fetching keys"))?
@@ -140,7 +141,7 @@ pub fn get_static_signing_keys() -> Result<StaticSigningKeysResponse> {
             // No runtime available, create a new one
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| anyhow!("Failed to create tokio runtime: {}", e))?;
-            rt.block_on(get_static_signing_keys_async())
+            rt.block_on(get_static_signing_keys_async(api_url.as_deref()))
         }
     }
 }
