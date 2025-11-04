@@ -105,7 +105,7 @@ impl PrivateNetworkValidator {
 
         // Only known relays can be tunnel hops
         if !self.is_known_relay(router_id) {
-            tracing::debug!(
+            tracing::warn!(
                 target: LOG_TARGET,
                 %router_id,
                 "router rejected as tunnel hop: not a known relay"
@@ -116,7 +116,7 @@ impl PrivateNetworkValidator {
         // Check bandwidth requirements if specified
         if let Some(min_bandwidth) = &self.min_bandwidth {
             if !self.meets_bandwidth_requirement(router_info, min_bandwidth) {
-                tracing::debug!(
+                tracing::warn!(
                     target: LOG_TARGET,
                     %router_id,
                     min_bandwidth = %min_bandwidth,
@@ -128,7 +128,7 @@ impl PrivateNetworkValidator {
 
         // Additional checks for private network
         if !router_info.is_reachable() || !router_info.is_usable() {
-            tracing::debug!(
+            tracing::warn!(
                 target: LOG_TARGET,
                 %router_id,
                 "router rejected as tunnel hop: not reachable or usable"
@@ -148,7 +148,7 @@ impl PrivateNetworkValidator {
 
         // Only known relays can be floodfill nodes
         if !self.is_known_relay(router_id) {
-            tracing::debug!(
+            tracing::warn!(
                 target: LOG_TARGET,
                 %router_id,
                 "router rejected as floodfill: not a known relay"
@@ -158,7 +158,7 @@ impl PrivateNetworkValidator {
 
         // Must have floodfill capability
         if !router_info.is_floodfill() {
-            tracing::debug!(
+            tracing::warn!(
                 target: LOG_TARGET,
                 %router_id,
                 "router rejected as floodfill: no floodfill capability"
@@ -169,7 +169,7 @@ impl PrivateNetworkValidator {
         // Check bandwidth requirements if specified
         if let Some(min_bandwidth) = &self.min_bandwidth {
             if !self.meets_bandwidth_requirement(router_info, min_bandwidth) {
-                tracing::debug!(
+                tracing::warn!(
                     target: LOG_TARGET,
                     %router_id,
                     min_bandwidth = %min_bandwidth,
@@ -191,7 +191,7 @@ impl PrivateNetworkValidator {
 
         // Only known relays can be added to routing table
         if !self.is_known_relay(router_id) {
-            tracing::debug!(
+            tracing::warn!(
                 target: LOG_TARGET,
                 %router_id,
                 "router rejected from routing table: not a known relay"
@@ -201,7 +201,7 @@ impl PrivateNetworkValidator {
 
         // Must be reachable and usable
         if !router_info.is_reachable() || !router_info.is_usable() {
-            tracing::debug!(
+            tracing::warn!(
                 target: LOG_TARGET,
                 %router_id,
                 "router rejected from routing table: not reachable or usable"
