@@ -449,43 +449,43 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
         );
 
         // Spawn task to periodically fetch and update relay routers list
-        if let Some(api_url) = reseed_api_url.as_ref() {
-            let router_for_relay_update = router_clone.clone();
-            let api_url_clone = api_url.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 5)); // Update every 5 minutes
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // if let Some(api_url) = reseed_api_url.as_ref() {
+        //     let router_for_relay_update = router_clone.clone();
+        //     let api_url_clone = api_url.clone();
+        //     tokio::spawn(async move {
+        //         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 5)); // Update every 5 minutes
+        //         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 
-                loop {
-                    interval.tick().await;
+        //         loop {
+        //             interval.tick().await;
                     
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        api_url = ?api_url_clone,
-                        "fetching relay routers list",
-                    );
+        //             tracing::debug!(
+        //                 target: LOG_TARGET,
+        //                 api_url = ?api_url_clone,
+        //                 "fetching relay routers list",
+        //             );
                     
-                    match get_relay_routers_async(Some(&api_url_clone)).await {
-                        Ok(response) => {
-                            tracing::info!(
-                                target: LOG_TARGET,
-                                count = response.count,
-                                "fetched relay routers, updating router",
-                            );
-                            let router_guard = router_for_relay_update.lock().await;
-                            router_guard.update_relay_list(response.relay_routers);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                error = ?e,
-                                "failed to fetch relay routers, will retry later",
-                            );
-                        }
-                    }
-                }
-            });
-        }
+        //             match get_relay_routers_async(Some(&api_url_clone)).await {
+        //                 Ok(response) => {
+        //                     tracing::info!(
+        //                         target: LOG_TARGET,
+        //                         count = response.count,
+        //                         "fetched relay routers, updating router",
+        //                     );
+        //                     let router_guard = router_for_relay_update.lock().await;
+        //                     router_guard.update_relay_list(response.relay_routers);
+        //                 }
+        //                 Err(e) => {
+        //                     tracing::warn!(
+        //                         target: LOG_TARGET,
+        //                         error = ?e,
+        //                         "failed to fetch relay routers, will retry later",
+        //                     );
+        //                 }
+        //             }
+        //         }
+        //     });
+        // }
     }
 
     // create port mapper from config and transport protocol info
