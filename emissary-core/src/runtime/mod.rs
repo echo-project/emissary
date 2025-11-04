@@ -18,7 +18,7 @@
 
 // TODO: documentation
 
-use futures::{future::Either, Stream};
+use futures::Stream;
 use rand_core::{CryptoRng, RngCore};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -67,17 +67,15 @@ pub trait TcpListener<TcpStream>: Unpin + Send + Sized + 'static {
 
 pub trait UdpSocket: Unpin + Send + Sized + Clone {
     fn bind(address: SocketAddr) -> impl Future<Output = Option<Self>>;
-    fn poll_send_to(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+    fn send_to(
+        &mut self,
         buf: &[u8],
         target: SocketAddr,
-    ) -> Poll<Option<usize>>;
-    fn poll_recv_from(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+    ) -> impl Future<Output = Option<usize>> + Send;
+    fn recv_from(
+        &mut self,
         buf: &mut [u8],
-    ) -> Poll<Option<(usize, SocketAddr)>>;
+    ) -> impl Future<Output = Option<(usize, SocketAddr)>> + Send;
     fn local_address(&self) -> Option<SocketAddr>;
 }
 
@@ -206,15 +204,8 @@ pub trait AddressBook: Unpin + Send + Sync + 'static {
     /// Attempt to resolve `host` into a base64-encoded `Destination`.
     fn resolve_b64(&self, host: String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
 
-    /// Attempt to resolve `host` into a base32-encoded destination hash.
-    ///
-    /// Returns `Either::Left` if `host` was found in the cache.
-    ///
-    /// Returns `Either::Right` if `host` was not found in the cache and a lookup was started.
-    fn resolve_b32(
-        &self,
-        host: String,
-    ) -> Either<String, Pin<Box<dyn Future<Output = Option<String>> + Send>>>;
+    /// Attemp to resolve `host` into a base32-encoded destination hash.
+    fn resolve_b32(&self, host: &str) -> Option<String>;
 }
 
 pub trait Storage: Unpin + Send + Sync + 'static {
