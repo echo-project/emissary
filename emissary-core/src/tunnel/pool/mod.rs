@@ -348,6 +348,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 tracing::warn!(
                     target: LOG_TARGET,
                     name = %self.config.name,
+                    hops_count = ?hops.len(),
                     hops_required = ?self.config.num_outbound_hops,
                     "not enough routers for outbound tunnel build",
                 );
@@ -580,6 +581,7 @@ impl<R: Runtime, S: TunnelSelector + HopSelector> TunnelPool<R, S> {
                 tracing::warn!(
                     target: LOG_TARGET,
                     name = %self.config.name,
+                    hops_count = ?hops.len(),
                     hops_required = ?self.config.num_inbound_hops,
                     "not enough routers for inbound tunnel build",
                 );
