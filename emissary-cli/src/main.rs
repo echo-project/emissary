@@ -64,7 +64,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Router context.
 struct RouterContext {
     /// Router.
-    router: Router<Runtime>,
+    router: Arc<tokio::sync::Mutex<Router<Runtime>>>,
+    // router: Router<Runtime>,
 
     /// Event subscriber.
     ///
@@ -362,11 +363,12 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;
 
     // Wrap router in Arc<Mutex<>> for sharing with relay update task
-    // let router_arc = Arc::new(tokio::sync::Mutex::new(router));
-    // let router_clone = router_arc.clone();
+    let router_arc = Arc::new(tokio::sync::Mutex::new(router));
+    let router_clone = router_arc.clone();
 
     // if sam was enabled, start all enabled proxies, client tunnels and the address book
-    if let Some(address) = router.protocol_address_info().sam_tcp {
+    // if let Some(address) = router.protocol_address_info().sam_tcp {
+    if let Some(address) = router_clone.lock().await.protocol_address_info().sam_tcp {
         // start http proxy if it was enabled
         if let Some(config) = http {
             // start event loop of address book manager if address book was enabled
@@ -449,58 +451,61 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
         );
 
         // Spawn task to periodically fetch and update relay routers list
-        // if let Some(api_url) = reseed_api_url.as_ref() {
-        //     let router_for_relay_update = router_clone.clone();
-        //     let api_url_clone = api_url.clone();
-        //     tokio::spawn(async move {
-        //         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 5)); // Update every 5 minutes
-        //         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        if let Some(api_url) = reseed_api_url.as_ref() {
+            let router_for_relay_update = router_clone.clone();
+            let api_url_clone = api_url.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 60)); // Update every 60 minutes
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 
-        //         loop {
-        //             interval.tick().await;
+                loop {
+                    interval.tick().await;
                     
-        //             tracing::debug!(
-        //                 target: LOG_TARGET,
-        //                 api_url = ?api_url_clone,
-        //                 "fetching relay routers list",
-        //             );
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        api_url = ?api_url_clone,
+                        "fetching relay routers list",
+                    );
                     
-        //             match get_relay_routers_async(Some(&api_url_clone)).await {
-        //                 Ok(response) => {
-        //                     tracing::info!(
-        //                         target: LOG_TARGET,
-        //                         count = response.count,
-        //                         "fetched relay routers, updating router",
-        //                     );
-        //                     let router_guard = router_for_relay_update.lock().await;
-        //                     router_guard.update_relay_list(response.relay_routers);
-        //                 }
-        //                 Err(e) => {
-        //                     tracing::warn!(
-        //                         target: LOG_TARGET,
-        //                         error = ?e,
-        //                         "failed to fetch relay routers, will retry later",
-        //                     );
-        //                 }
-        //             }
-        //         }
-        //     });
-        // }
+                    match get_relay_routers_async(Some(&api_url_clone)).await {
+                        Ok(response) => {
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                count = response.count,
+                                "fetched relay routers, updating router",
+                            );
+                            let router_guard = router_for_relay_update.lock().await;
+                            router_guard.update_relay_list(response.relay_routers);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                error = ?e,
+                                "failed to fetch relay routers, will retry later",
+                            );
+                        }
+                    }
+                }
+            });
+        }
     }
 
     // create port mapper from config and transport protocol info
     //
     // `PortMapper` can be polled for external address discoveries
-    // let router_for_port_mapper = router_clone.lock().await;
+    let router_for_port_mapper = router_clone.lock().await;
     let port_mapper = PortMapper::new(
         port_forwarding,
-        router.protocol_address_info().ntcp2_port,
-        router.protocol_address_info().ssu2_port,
+        // router.protocol_address_info().ntcp2_port,
+        // router.protocol_address_info().ssu2_port,
+        router_for_port_mapper.protocol_address_info().ntcp2_port,
+        router_for_port_mapper.protocol_address_info().ssu2_port,
     );
-    // drop(router_for_port_mapper);
+    drop(router_for_port_mapper);
 
     Ok(RouterContext {
-        router: router,
+        // router: router,
+        router: router_clone,
         events,
         port_mapper,
         router_ui_config,
@@ -515,7 +520,8 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
 ///  * [`PortMapper`]'s event loop
 ///  * RX channel for receiving a shutdown signal from router UI
 async fn router_event_loop(
-    mut router: Router<Runtime>,
+    // mut router: Router<Runtime>,
+    router: Arc<tokio::sync::Mutex<Router<Runtime>>>,
     mut port_mapper: PortMapper,
     mut shutdown_rx: Receiver<()>,
 ) {
@@ -523,17 +529,35 @@ async fn router_event_loop(
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 port_mapper.shutdown().await;
-                router.shutdown();
+                router.lock().await.shutdown();
+                // router.shutdown();
             }
             _ = shutdown_rx.recv() => {
                 port_mapper.shutdown().await;
-                router.shutdown();
+                router.lock().await.shutdown();
+                // router.shutdown();
             }
             address = port_mapper.next() => {
                 // the value must exist since the stream never terminates
-                router.add_external_address(address.expect("value"));
+                router.lock().await.add_external_address(address.expect("value"));
+                // router.add_external_address(address.expect("value"));
             },
-            _ = &mut router => {
+            _ = async {
+                    loop {
+                        let mut router_guard = router.lock().await;
+                        let mut pinned_router = Pin::new(&mut *router_guard);
+                        let waker = futures::task::noop_waker();
+                        let mut cx = std::task::Context::from_waker(&waker);
+                        match pinned_router.as_mut().poll(&mut cx) {
+                            std::task::Poll::Ready(()) => return (),
+                            std::task::Poll::Pending => {
+                                drop(router_guard);
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    }
+                } => {
+            // _ = &mut router => {
                 tracing::info!(
                     target: LOG_TARGET,
                     "emissary shut down",
