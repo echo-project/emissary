@@ -18,7 +18,10 @@
 
 use crate::{
     crypto::{base32_encode, base64_encode, StaticPublicKey},
-    error::{Error, QueryError},
+    error::{
+        parser::{DatabaseStoreParseError, RouterIdentityParseError, RouterInfoParseError},
+        Error, QueryError,
+    },
     i2np::{
         database::{
             lookup::{DatabaseLookup, LookupType, ReplyType},
@@ -1102,11 +1105,22 @@ impl<R: Runtime> NetDb<R> {
             payload,
             reply,
             ..
-        } = DatabaseStore::<R>::parse(&message.payload).ok_or_else(|| {
-            tracing::debug!(
-                target: LOG_TARGET,
-                "malformed database store received",
-            );
+        } = DatabaseStore::<R>::parse(&message.payload).map_err(|error| {
+            match error {
+                DatabaseStoreParseError::RouterInfo(RouterInfoParseError::InvalidIdentity(
+                    RouterIdentityParseError::InvalidPublicKey(0),
+                )) => tracing::debug!(
+                    ?sender,
+                    "ignoring database store for router info with elgamal encryption key",
+                ),
+                error => tracing::warn!(
+                    target: LOG_TARGET,
+                    ?error,
+                    ?sender,
+                    "malformed database store received",
+                ),
+            }
+
             Error::InvalidData
         })?;
 
@@ -1261,17 +1275,19 @@ impl<R: Runtime> NetDb<R> {
     ) -> crate::Result<()> {
         // if the value was received directly from the floodfill, i.e., not
         // through tunnel, adjust the floodfill score
-        if let Some(router_id) = sender {
-            self.floodfill_dht.register_lookup_failure(&router_id);
+        if let Some(ref router_id) = sender {
+            self.floodfill_dht.register_lookup_failure(router_id);
         }
 
         let DatabaseSearchReply {
             key,
             mut routers,
             from,
-        } = DatabaseSearchReply::parse(&message.payload).ok_or_else(|| {
+        } = DatabaseSearchReply::parse(&message.payload).map_err(|error| {
             tracing::warn!(
                 target: LOG_TARGET,
+                ?sender,
+                ?error,
                 "malformed database search reply",
             );
             Error::InvalidData
@@ -1445,9 +1461,11 @@ impl<R: Runtime> NetDb<R> {
                     key,
                     lookup,
                     reply,
-                } = DatabaseLookup::parse(&message.payload).ok_or_else(|| {
+                } = DatabaseLookup::parse(&message.payload).map_err(|error| {
                     tracing::warn!(
                         target: LOG_TARGET,
+                        ?sender,
+                        ?error,
                         "malformed database lookup received",
                     );
                     Error::InvalidData
@@ -3093,7 +3111,7 @@ mod tests {
                 }
                 .serialize(&sgk),
             );
-            let expires = LeaseSet2::parse(&lease_set).unwrap().expires();
+            let expires = LeaseSet2::parse::<MockRuntime>(&lease_set).unwrap().expires();
 
             (Bytes::from(id.to_vec()), lease_set, expires)
         };
@@ -3538,7 +3556,7 @@ mod tests {
         let message = Message::parse_short(&message).unwrap();
 
         assert_eq!(message.message_type, MessageType::DatabaseStore);
-        assert!(DatabaseStore::<MockRuntime>::parse(&message.payload).is_some());
+        assert!(DatabaseStore::<MockRuntime>::parse(&message.payload).is_ok());
     }
 
     #[tokio::test]

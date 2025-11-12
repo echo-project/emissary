@@ -48,6 +48,7 @@ use core::{fmt, time::Duration};
 const LOG_TARGET: &str = "emissary::ntcp2::responder";
 
 /// Responder state.
+#[derive(Default)]
 enum ResponderState {
     /// Responder has received `SessionRequest` message from remote peer,
     /// has initialized NTCP2 session state and is waiting to read padding bytes
@@ -82,6 +83,7 @@ enum ResponderState {
     },
 
     /// Responder state has been poisoned.
+    #[default]
     Poisoned,
 }
 
@@ -93,12 +95,6 @@ impl fmt::Debug for ResponderState {
             Self::SessionCreated { .. } => f.debug_struct("SessionCreated").finish_non_exhaustive(),
             Self::Poisoned => f.debug_struct("Poisoned").finish(),
         }
-    }
-}
-
-impl Default for ResponderState {
-    fn default() -> Self {
-        Self::Poisoned
     }
 }
 
@@ -369,20 +365,30 @@ impl Responder {
             noise_ctx.mix_hash(&message[48..]);
 
             match MessageBlock::parse(&router_info) {
-                Some(MessageBlock::RouterInfo { router_info, .. }) =>
-                    RouterInfo::parse(router_info).ok_or_else(|| {
-                        tracing::debug!(
+                Ok(MessageBlock::RouterInfo { router_info, .. }) => RouterInfo::parse(router_info)
+                    .map_err(|error| {
+                        tracing::warn!(
                             target: LOG_TARGET,
-                            "received malformed `RouterInfo` message block"
+                            ?error,
+                            "failed to parse remote router info",
                         );
 
                         Error::InvalidData
                     }),
-                message => {
+                Ok(message) => {
                     tracing::warn!(
                         target: LOG_TARGET,
                         ?message,
-                        "failed to parse router info",
+                        "received an unexpected ntcp2 message block",
+                    );
+                    Err(Error::InvalidData)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        ?message,
+                        ?error,
+                        "received a malformed ntcp2 message block",
                     );
                     Err(Error::InvalidData)
                 }

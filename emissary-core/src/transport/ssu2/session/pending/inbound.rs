@@ -206,11 +206,12 @@ impl<R: Runtime> InboundSsu2Session<R> {
         ChaChaPoly::with_nonce(&intro_key, pkt_num as u64)
             .decrypt_with_ad(&pkt[..32], &mut payload)?;
 
-        Block::parse(&payload).ok_or_else(|| {
+        Block::parse(&payload).map_err(|error| {
             tracing::warn!(
                 target: LOG_TARGET,
                 ?dst_id,
                 ?src_id,
+                ?error,
                 "failed to parse message blocks",
             );
             debug_assert!(false);
@@ -399,11 +400,12 @@ impl<R: Runtime> InboundSsu2Session<R> {
         // MixHash(ciphertext)
         self.noise_ctx.mix_hash(&pkt[64..pkt.len()]);
 
-        if Block::parse(&payload).is_none() {
+        if let Err(error) = Block::parse(&payload) {
             tracing::warn!(
                 target: LOG_TARGET,
                 dst_id = ?self.dst_id,
                 src_id = ?self.src_id,
+                ?error,
                 "malformed `SessionRequest` payload",
             );
             debug_assert!(false);
@@ -532,14 +534,15 @@ impl<R: Runtime> InboundSsu2Session<R> {
             .decrypt_with_ad(self.noise_ctx.state(), &mut payload)?;
         cipher_key.zeroize();
 
-        let Some(blocks) = Block::parse(&payload) else {
+        let blocks = Block::parse(&payload).map_err(|error| {
             tracing::warn!(
                 target: LOG_TARGET,
+                ?error,
                 "failed to parse message blocks of `SessionConfirmed`",
             );
             debug_assert!(false);
-            return Err(Ssu2Error::Malformed);
-        };
+            Ssu2Error::Malformed
+        })?;
 
         let Some(Block::RouterInfo { router_info }) =
             blocks.iter().find(|block| core::matches!(block, Block::RouterInfo { .. }))
@@ -636,7 +639,7 @@ impl<R: Runtime> InboundSsu2Session<R> {
                     "inbound session state is poisoned",
                 );
                 debug_assert!(false);
-                Ok(Some(PendingSsu2SessionStatus::SessionTermianted {
+                Ok(Some(PendingSsu2SessionStatus::SessionTerminated {
                     connection_id: self.dst_id,
                     started: self.started,
                     router_id: None,
@@ -678,7 +681,7 @@ impl<R: Runtime> Future for InboundSsu2Session<R> {
                         "failed to handle packet",
                     );
 
-                    return Poll::Ready(PendingSsu2SessionStatus::SessionTermianted {
+                    return Poll::Ready(PendingSsu2SessionStatus::SessionTerminated {
                         connection_id: self.dst_id,
                         router_id: None,
                         started: self.started,
@@ -741,6 +744,7 @@ mod tests {
     }
 
     struct OutboundContext {
+        outbound_intro_key: [u8; 32],
         outbound_session: OutboundSsu2Session<MockRuntime>,
         outbound_session_tx: Sender<Packet>,
         outbound_socket_rx: Receiver<Packet>,
@@ -752,6 +756,12 @@ mod tests {
         let dst_id = MockRuntime::rng().next_u64();
 
         let outbound_static_key = StaticPrivateKey::random(MockRuntime::rng());
+        let outbound_intro_key = {
+            let mut key = [0u8; 32];
+            MockRuntime::rng().fill_bytes(&mut key);
+
+            key
+        };
         let inbound_static_key = StaticPrivateKey::random(MockRuntime::rng());
         let inbound_intro_key = {
             let mut key = [0u8; 32];
@@ -782,12 +792,7 @@ mod tests {
                 publish: true,
                 static_key: TryInto::<[u8; 32]>::try_into(outbound_static_key.as_ref().to_vec())
                     .unwrap(),
-                intro_key: {
-                    let mut key = [0u8; 32];
-                    MockRuntime::rng().fill_bytes(&mut key);
-
-                    key
-                },
+                intro_key: outbound_intro_key,
             })
             .build();
 
@@ -795,7 +800,8 @@ mod tests {
             address,
             chaining_key: Bytes::from(chaining_key.clone()),
             dst_id,
-            intro_key: inbound_intro_key,
+            remote_intro_key: inbound_intro_key,
+            local_intro_key: outbound_intro_key,
             net_id: 2u8,
             local_static_key: outbound_static_key,
             pkt_tx: outbound_socket_tx,
@@ -844,6 +850,7 @@ mod tests {
                 inbound_session: inbound,
             },
             OutboundContext {
+                outbound_intro_key,
                 outbound_socket_rx,
                 outbound_session_tx,
                 outbound_session: outbound,
@@ -896,6 +903,7 @@ mod tests {
                 outbound_session,
                 outbound_session_tx: _ob_sess_tx,
                 outbound_socket_rx,
+                ..
             },
         ) = create_session();
         let intro_key = inbound_session.intro_key;
@@ -952,6 +960,7 @@ mod tests {
                 outbound_session,
                 outbound_session_tx: ob_sess_tx,
                 outbound_socket_rx,
+                ..
             },
         ) = create_session();
         let intro_key = inbound_session.intro_key;
@@ -973,7 +982,7 @@ mod tests {
         loop {
             tokio::select! {
                 status = &mut inbound_session => match status {
-                    PendingSsu2SessionStatus::SessionTermianted { .. } => break,
+                    PendingSsu2SessionStatus::SessionTerminated { .. } => break,
                     _ => panic!("invalid status"),
                 },
                 pkt = outbound_socket_rx.recv() => {
@@ -1014,6 +1023,7 @@ mod tests {
                 outbound_session,
                 outbound_session_tx: ob_sess_tx,
                 outbound_socket_rx,
+                ..
             },
         ) = create_session();
         let intro_key = inbound_session.intro_key;
@@ -1072,6 +1082,7 @@ mod tests {
                 inbound_session_tx: ib_sess_tx,
             },
             OutboundContext {
+                outbound_intro_key,
                 outbound_session,
                 outbound_session_tx: ob_sess_tx,
                 outbound_socket_rx,
@@ -1154,7 +1165,7 @@ mod tests {
             Ok(PendingSsu2SessionStatus::NewInboundSession {
                 mut pkt, target, ..
             }) => {
-                let mut reader = HeaderReader::new(intro_key, &mut pkt).unwrap();
+                let mut reader = HeaderReader::new(outbound_intro_key, &mut pkt).unwrap();
                 let _connection_id = reader.dst_id();
 
                 ob_sess_tx
@@ -1186,6 +1197,7 @@ mod tests {
                 outbound_session,
                 outbound_session_tx: ob_sess_tx,
                 outbound_socket_rx,
+                ..
             },
         ) = create_session();
 

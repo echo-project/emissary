@@ -44,6 +44,7 @@ impl thingbuf::Recycle<NetDbAction> for NetDbActionRecycle {
 }
 
 /// Query kind.
+#[derive(Default)]
 pub enum NetDbAction {
     /// [`LeaseSet2`] query.
     QueryLeaseSet2 {
@@ -98,13 +99,8 @@ pub enum NetDbAction {
     WaitUntilReady { tx: oneshot::Sender<()> },
 
     /// Dummy value.
+    #[default]
     Dummy,
-}
-
-impl Default for NetDbAction {
-    fn default() -> Self {
-        Self::Dummy
-    }
 }
 
 /// Handle to [`NetDb`].
@@ -260,7 +256,7 @@ mod tests {
                 router_info,
             }) => {
                 assert_eq!(key, router_id);
-                assert!(RouterInfo::parse(router_info).is_some());
+                assert!(RouterInfo::parse(router_info).is_ok());
             }
             _ => panic!("invalid event"),
         }
