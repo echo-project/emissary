@@ -496,8 +496,22 @@ impl<T: Tunnel> PendingTunnel<T> {
                         hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
                         return Err(hop_results);
                     }
-                    Some(record) =>
-                        if Sha256::new().update(record).finalize_new() != checksum {
+                    Some(record) => {
+                        // Decrypt the fake record using all hops' reply keys in reverse order
+                        // (same order transit routers encrypted it)
+                        let mut decrypted_record = record.to_vec();
+                        for hop in self.hops.iter().rev() {
+                            let record_idx = message.payload[1..]
+                                .chunks(SHORT_RECORD_LEN)
+                                .position(|chunk| &chunk[..16] == &local_hash[..16])
+                                .expect("fake record to exist");
+                            
+                            if record_idx != hop.record_index() {
+                                ChaCha::with_nonce(hop.key_context.reply_key(), record_idx as u64)
+                                    .decrypt_ref(&mut decrypted_record);
+                            }
+                        }
+                        if Sha256::new().update(&decrypted_record).finalize_new() != checksum {
                             tracing::warn!(
                                 target: LOG_TARGET,
                                 tunnel = %self.tunnel_id,
@@ -507,7 +521,8 @@ impl<T: Tunnel> PendingTunnel<T> {
 
                             hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
                             return Err(hop_results);
-                        },
+                        }
+                    }
                 }
 
                 message.payload.to_vec()
