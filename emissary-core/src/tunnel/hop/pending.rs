@@ -497,20 +497,24 @@ impl<T: Tunnel> PendingTunnel<T> {
                         return Err(hop_results);
                     }
                     Some(record) => {
+                        // Find the fake record index once
+                        let fake_record_idx = message.payload[1..]
+                            .chunks(SHORT_RECORD_LEN)
+                            .position(|chunk| &chunk[..16] == &local_hash[..16])
+                            .expect("fake record to exist");
+                        
                         // Decrypt the fake record using all hops' reply keys in reverse order
-                        // (same order transit routers encrypted it)
+                        // Transit routers encrypted it in forward order during the request phase,
+                        // so we decrypt in reverse order (last router first, first router last)
                         let mut decrypted_record = record.to_vec();
                         for hop in self.hops.iter().rev() {
-                            let record_idx = message.payload[1..]
-                                .chunks(SHORT_RECORD_LEN)
-                                .position(|chunk| &chunk[..16] == &local_hash[..16])
-                                .expect("fake record to exist");
-                            
-                            if record_idx != hop.record_index() {
-                                ChaCha::with_nonce(hop.key_context.reply_key(), record_idx as u64)
+                            // Each transit router encrypted all records except its own
+                            if fake_record_idx != hop.record_index() {
+                                ChaCha::with_nonce(hop.key_context.reply_key(), fake_record_idx as u64)
                                     .decrypt_ref(&mut decrypted_record);
                             }
                         }
+                        
                         if Sha256::new().update(&decrypted_record).finalize_new() != checksum {
                             tracing::warn!(
                                 target: LOG_TARGET,
