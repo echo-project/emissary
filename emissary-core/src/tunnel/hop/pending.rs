@@ -514,7 +514,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                                     .decrypt_ref(&mut decrypted_record);
                             }
                         }
-                        
+
                         if Sha256::new().update(&decrypted_record).finalize_new() != checksum {
                             tracing::warn!(
                                 target: LOG_TARGET,
@@ -525,6 +525,13 @@ impl<T: Tunnel> PendingTunnel<T> {
 
                             hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
                             return Err(hop_results);
+                        } else {
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                tunnel = %self.tunnel_id,
+                                direction = ?T::direction(),
+                                "fake local record okay",
+                            );
                         }
                     }
                 }
