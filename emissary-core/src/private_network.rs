@@ -97,18 +97,19 @@ impl PrivateNetworkValidator {
     }
 
     /// Check if a router can participate as a tunnel hop.
-    /// In private network mode, only known relays can be tunnel hops.
+    /// In private network mode, only known relays can be participant hops.
+    /// Unknown routers can be endpoint hops (IBGW/OBEP) but not participant hops.
     pub fn can_be_tunnel_hop(&self, router_id: &RouterId, router_info: &RouterInfo) -> bool {
         if !self.enabled {
             return true; // Normal I2P behavior when private network is disabled
         }
 
-        // Only known relays can be tunnel hops
-        if !self.is_known_relay(router_id) {
+        // All routers must pass basic checks (reachable, usable)
+        if !router_info.is_reachable() || !router_info.is_usable() {
             tracing::warn!(
                 target: LOG_TARGET,
                 %router_id,
-                "router rejected as tunnel hop: not a known relay"
+                "router rejected as tunnel hop: not reachable or usable"
             );
             return false;
         }
@@ -126,7 +127,24 @@ impl PrivateNetworkValidator {
             }
         }
 
-        // Additional checks for private network
+        true
+    }
+
+    /// Check if a router can participate as a tunnel hop with a specific role.
+    /// In private network mode:
+    /// - Participant hops must be known relays
+    /// - Endpoint hops (IBGW/OBEP) can be unknown routers
+    pub fn can_be_tunnel_hop_with_role(
+        &self,
+        router_id: &RouterId,
+        router_info: &RouterInfo,
+        role: crate::i2np::HopRole,
+    ) -> bool {
+        if !self.enabled {
+            return true; // Normal I2P behavior when private network is disabled
+        }
+
+        // All routers must pass basic checks (reachable, usable)
         if !router_info.is_reachable() || !router_info.is_usable() {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -134,6 +152,39 @@ impl PrivateNetworkValidator {
                 "router rejected as tunnel hop: not reachable or usable"
             );
             return false;
+        }
+
+        // Check bandwidth requirements if specified
+        if let Some(min_bandwidth) = &self.min_bandwidth {
+            if !self.meets_bandwidth_requirement(router_info, min_bandwidth) {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    min_bandwidth = %min_bandwidth,
+                    "router rejected as tunnel hop: insufficient bandwidth"
+                );
+                return false;
+            }
+        }
+
+        // Participant hops must be known relays
+        // Endpoint hops (IBGW/OBEP) can be unknown routers
+        match role {
+            crate::i2np::HopRole::Participant => {
+                if !self.is_known_relay(router_id) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        %router_id,
+                        "router rejected as participant hop: not a known relay"
+                    );
+                    return false;
+                }
+            }
+            crate::i2np::HopRole::InboundGateway | crate::i2np::HopRole::OutboundEndpoint => {
+                // Endpoint hops can be unknown routers
+                // This allows unknown routers to be IBGW (first hop of inbound tunnel)
+                // or OBEP (last hop of outbound tunnel)
+            }
         }
 
         true
@@ -185,8 +236,6 @@ impl PrivateNetworkValidator {
     /// Check if a router can be added to the routing table.
     /// In private network mode, only known relays can be added.
     pub fn can_be_added_to_routing_table(&self, router_id: &RouterId, router_info: &RouterInfo) -> bool {
-        return true;
-        
         if !self.enabled {
             return true; // Normal I2P behavior
         }
