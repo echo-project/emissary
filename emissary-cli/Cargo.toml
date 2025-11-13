@@ -54,7 +54,7 @@ tempfile = { workspace = true }
 fast-socks5 = { version = "0.10.0", features = ["socks4"] }
 
 [features]
-default = ["native-ui"]
+default = ["web-ui"]
 native-ui = ["chrono", "iced", "plotters", "plotters-iced", "serde_json"]
 web-ui = ["axum", "serde_json", "tokio-tungstenite"]
 metrics = ["emissary-util/metrics"]
