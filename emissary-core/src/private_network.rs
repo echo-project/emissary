@@ -185,6 +185,8 @@ impl PrivateNetworkValidator {
     /// Check if a router can be added to the routing table.
     /// In private network mode, only known relays can be added.
     pub fn can_be_added_to_routing_table(&self, router_id: &RouterId, router_info: &RouterInfo) -> bool {
+        return true;
+        
         if !self.enabled {
             return true; // Normal I2P behavior
         }

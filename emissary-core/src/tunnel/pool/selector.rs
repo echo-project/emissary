@@ -382,6 +382,11 @@ impl<R: Runtime> TunnelSelector for ExploratorySelector<R> {
 impl<R: Runtime> HopSelector for ExploratorySelector<R> {
     // TODO: refactor
     fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
+        let private_network = self.private_network.lock().unwrap();
+        let is_enabled = private_network.is_enabled();
+        let known_relay_count = private_network.known_relay_count();
+        drop(private_network);
+
         let mut router_ids = self.profile_storage.get_router_ids(
             Bucket::Standard,
             |router_id, router_info, profile| {
@@ -392,6 +397,15 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                     && self.private_network.lock().unwrap().can_be_tunnel_hop(router_id, router_info)
             },
         );
+
+        if router_ids.is_empty() && is_enabled {
+            tracing::warn!(
+                target: LOG_TARGET,
+                num_hops_required = num_hops,
+                known_relay_count = known_relay_count,
+                "no standard routers available for tunnel hop selection in private network mode"
+            );
+        }
 
         // insecure tunnels are allowed, don't do safety checks
         if self.insecure {
