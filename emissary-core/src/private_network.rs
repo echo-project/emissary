@@ -241,14 +241,14 @@ impl PrivateNetworkValidator {
         }
 
         // Only known relays can be added to routing table
-        if !self.is_known_relay(router_id) {
-            tracing::warn!(
-                target: LOG_TARGET,
-                %router_id,
-                "router rejected from routing table: not a known relay"
-            );
-            return false;
-        }
+        // if !self.is_known_relay(router_id) {
+        //     tracing::warn!(
+        //         target: LOG_TARGET,
+        //         %router_id,
+        //         "router rejected from routing table: not a known relay"
+        //     );
+        //     return false;
+        // }
 
         // Must be reachable and usable
         if !router_info.is_reachable() || !router_info.is_usable() {
