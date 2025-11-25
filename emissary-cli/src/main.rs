@@ -20,21 +20,17 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::{
-    address_book::{AddressBookHandle, AddressBookManager},
-    cli::Arguments,
-    config::{Config, EmissaryConfig, ReseedConfig, RouterUiConfig},
-    error::Error,
-    port_mapper::PortMapper,
-    proxy::{http::HttpProxy, socks::SocksProxy},
-    storage::RouterStorage,
-    tools::{reseed_api::{get_relay_routers_async, StoreNetdbRequest, UpdateRouterInfoRequest}, RouterCommand},
-    tunnel::{client::ClientTunnelManager, server::ServerTunnelManager},
+    address_book::{AddressBookHandle, AddressBookManager}, cli::Arguments, config::{Config, EmissaryConfig, ReseedConfig, RouterUiConfig}, error::Error, port_mapper::PortMapper, proxy::{http::HttpProxy, socks::SocksProxy}, tools::reseed_api::{StoreNetdbRequest, UpdateRouterInfoRequest, get_relay_routers_async}, tunnel::{client::ClientTunnelManager, server::ServerTunnelManager}
 };
 
 use anyhow::anyhow;
 use clap::Parser;
-use emissary_core::{events::EventSubscriber, primitives::RouterInfo, router::Router, runtime::AddressBook};
-use emissary_util::{reseeder::Reseeder, runtime::tokio::Runtime, su3::ReseedRouterInfo};
+use emissary_core::{
+    events::EventSubscriber, primitives::{RouterId, RouterInfo}, router::Router, runtime::AddressBook,
+};
+use emissary_util::{
+    reseeder::Reseeder, runtime::tokio::Runtime, storage::Storage, su3::ReseedRouterInfo,
+};
 use futures::{channel::oneshot, StreamExt};
 use tokio::sync::mpsc::{channel, Receiver};
 
@@ -47,7 +43,6 @@ mod error;
 mod logger;
 mod port_mapper;
 mod proxy;
-mod storage;
 mod tools;
 mod tunnel;
 mod ui;
@@ -70,6 +65,10 @@ struct RouterContext {
     /// Base path.
     #[allow(unused)]
     base_path: PathBuf,
+
+    /// Local router ID.
+    #[allow(unused)]
+    router_id: RouterId,
 
     /// Event subscriber.
     ///
@@ -97,43 +96,13 @@ struct RouterContext {
 /// caller to setup the router.
 ///
 /// If subcommand has been specified, execute the command and exit.
-fn parse_arguments() -> Arguments {
+async fn parse_arguments() -> Arguments {
     let arguments = Arguments::parse();
 
-    let Some(command) = arguments.command else {
-        return arguments;
-    };
-
-    match command {
-        RouterCommand::Base64Encode {
-            string,
-            file,
-            output,
-        } =>
-            if let Err(error) = tools::base64::encode(string, file, output) {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "failed to base64-encode input",
-                );
-                std::process::exit(1);
-            },
-        RouterCommand::Base64Decode {
-            string,
-            file,
-            output,
-        } =>
-            if let Err(error) = tools::base64::decode(string, file, output) {
-                tracing::error!(
-                    target: LOG_TARGET,
-                    ?error,
-                    "failed to base64-decode input",
-                );
-                std::process::exit(1);
-            },
+    match arguments.command {
+        Some(command) => command.execute().await,
+        None => arguments,
     }
-
-    std::process::exit(0);
 }
 
 /// Setup router and related subsystems.
@@ -141,8 +110,11 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
     // initialize logger with any logging directive given as a cli argument
     let handle = init_logger!(arguments.log.clone());
 
+    // initialize storage for the router
+    let storage = Storage::new(arguments.base_path.clone()).await?;
+
     // parse router config and merge it with cli options
-    let mut config = Config::parse(arguments.base_path.clone(), &arguments).map_err(|error| {
+    let mut config = Config::parse(&arguments, &storage).await.map_err(|error| {
         tracing::warn!(
             target: LOG_TARGET,
             ?error,
@@ -151,7 +123,6 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
 
         error
     })?;
-    let storage = RouterStorage::new(config.base_path.clone());
 
     // reinitialize the logger with any directives given in the configuration file
     init_logger!(config.log.clone(), handle);
@@ -376,6 +347,7 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
     // save newest router info to disk
     File::create(path.join("router.info"))?.write_all(&local_router_info)?;
 
+    let router_id = router.router_id().clone();
     // Wrap router in Arc<Mutex<>> for sharing with relay update task
     let router_arc = Arc::new(tokio::sync::Mutex::new(router));
     let router_clone = router_arc.clone();
@@ -534,6 +506,7 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
         config: router_config,
         events,
         port_mapper,
+        router_id: router_id,
         router: router_clone,
         router_ui_config,
     })
@@ -599,7 +572,7 @@ async fn router_event_loop(
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let (_tx, shutdown_rx) = channel(1);
-    let arguments = parse_arguments();
+    let arguments = runtime.block_on(parse_arguments());
     let RouterContext {
         port_mapper,
         router,
@@ -615,7 +588,7 @@ fn main() -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let (shutdown_tx, shutdown_rx) = channel(1);
-    let arguments = parse_arguments();
+    let arguments = runtime.block_on(parse_arguments());
     let RouterContext {
         events,
         port_mapper,
@@ -647,7 +620,7 @@ fn main() -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let (shutdown_tx, shutdown_rx) = channel(1);
-    let arguments = parse_arguments();
+    let arguments = runtime.block_on(parse_arguments());
     let RouterContext {
         router,
         port_mapper,
@@ -656,6 +629,7 @@ fn main() -> anyhow::Result<()> {
         config,
         base_path,
         address_book_handle,
+        router_id,
     } = runtime.block_on(setup_router(arguments))?;
 
     match router_ui_config {
@@ -670,7 +644,14 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(0);
             });
 
-            ui::native::RouterUi::start(events, config, base_path, address_book_handle, shutdown_tx)
+            ui::native::RouterUi::start(
+                events,
+                config,
+                base_path,
+                address_book_handle,
+                router_id,
+                shutdown_tx,
+            )
         }
     }
 }

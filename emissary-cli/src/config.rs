@@ -23,18 +23,12 @@ use crate::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use home::home_dir;
 use rand::{rngs::OsRng, thread_rng, Rng, RngCore};
+use emissary_util::storage::{Storage, StorageBundle};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
-use std::{
-    collections::HashSet,
-    fs,
-    io::{Read, Write},
-    net::Ipv4Addr,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::HashSet, net::Ipv4Addr, path::PathBuf};
 
 /// Reserved ports.
 ///
@@ -47,48 +41,7 @@ const RESERVED_PORTS: [u16; 57] = [
     27008, 27009, 28000,
 ];
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Profile {
-    last_activity: Option<u64>,
-    last_declined: Option<u64>,
-    last_dial_failure: Option<u64>,
-    num_accepted: Option<usize>,
-    num_connection: Option<usize>,
-    num_dial_failures: Option<usize>,
-    num_lookup_failures: Option<usize>,
-    num_lookup_no_responses: Option<usize>,
-    num_lookup_successes: Option<usize>,
-    num_rejected: Option<usize>,
-    num_selected: Option<usize>,
-    num_test_failures: Option<usize>,
-    num_test_successes: Option<usize>,
-    num_unaswered: Option<usize>,
-}
-
-impl From<emissary_core::Profile> for Profile {
-    fn from(profile: emissary_core::Profile) -> Self {
-        Profile {
-            last_activity: Some(profile.last_activity.as_secs()),
-            last_declined: profile.last_declined.map(|last_declined| last_declined.as_secs()),
-            last_dial_failure: profile
-                .last_dial_failure
-                .map(|last_dial_failure| last_dial_failure.as_secs()),
-            num_accepted: Some(profile.num_accepted),
-            num_connection: Some(profile.num_connection),
-            num_dial_failures: Some(profile.num_dial_failures),
-            num_lookup_failures: Some(profile.num_lookup_failures),
-            num_lookup_no_responses: Some(profile.num_lookup_no_responses),
-            num_lookup_successes: Some(profile.num_lookup_successes),
-            num_rejected: Some(profile.num_rejected),
-            num_selected: Some(profile.num_selected),
-            num_test_failures: Some(profile.num_test_failures),
-            num_test_successes: Some(profile.num_test_successes),
-            num_unaswered: Some(profile.num_unaswered),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExploratoryConfig {
     pub inbound_len: Option<usize>,
     pub inbound_count: Option<usize>,
@@ -269,7 +222,7 @@ impl Default for EmissaryConfig {
             ntcp2: Some(Ntcp2Config {
                 port: {
                     loop {
-                        let port: u16 = rand::thread_rng().gen_range(9151..=30777);
+                        let port: u16 = thread_rng().gen_range(9151..=30777);
 
                         if !RESERVED_PORTS.iter().any(|reserved_port| reserved_port == &port) {
                             break port;
@@ -447,133 +400,14 @@ impl Config {
     ///
     /// If the configuratin file exists but it's invalid, exit early, unless `--overwrite-config`
     /// has been passed in which case create new default configuration.
-    pub fn parse(path: Option<PathBuf>, arguments: &Arguments) -> Result<Self, Error> {
-        let path = path
-            .map_or_else(
-                || {
-                    let mut path = home_dir()?;
-                    (!path.as_os_str().is_empty()).then(|| {
-                        path.push(".emissary");
-                        path
-                    })
-                },
-                Some,
-            )
-            .ok_or(Error::Custom(String::from("couldn't resolve base path")))?;
+    pub async fn parse(arguments: &Arguments, storage: &Storage) -> Result<Self, Error> {
+        let path = storage.base_path();
 
         tracing::trace!(
             target: LOG_TARGET,
             ?path,
             "parse router config",
         );
-
-        // if base path doesn't exist, create it and return empty config
-        if !path.exists() {
-            fs::create_dir_all(&path)?;
-            Config::create_netdb_dir(path.join("netDb"))?;
-            Config::create_profiles_dir(path.join("peerProfiles"))?;
-
-            return Config::new_empty(path);
-        }
-
-        if !path.join("netDb").exists() {
-            Config::create_netdb_dir(path.join("netDb"))?;
-        }
-
-        if !path.join("peerProfiles").exists() {
-            Config::create_profiles_dir(path.join("peerProfiles"))?;
-        }
-
-        let router_config = match Self::load_router_config(path.clone()) {
-            Err(Error::InvalidData) if arguments.overwrite_config.unwrap_or(false) => None,
-            Err(Error::InvalidData) => return Err(Error::InvalidData),
-            Err(_) => None,
-            Ok(config) => Some(config),
-        };
-
-        // read static & signing keys from disk or fetch from API
-        let (static_key, api_keys) = match Self::load_key(path.clone(), "static") {
-            Ok(key) => {
-                // Static key exists on disk, use it
-                (x25519_dalek::StaticSecret::from(key).to_bytes(), None)
-            }
-            Err(_) => {
-                let router_config_clone = router_config.clone();
-                let reseed_api_url = router_config_clone.unwrap().reseed_api_url.clone();
-                // Static key doesn't exist, fetch both keys from API
-                let api_response = crate::tools::reseed_api::get_static_signing_keys(reseed_api_url.as_deref())
-                    .map_err(|e| Error::Custom(format!("Failed to fetch keys from reseed API: {}", e)))?;
-                
-                // Decode static key from API
-                let static_key_decoded = STANDARD
-                    .decode(&api_response.static_key)
-                    .map_err(|e| Error::Custom(format!("Failed to decode static key from API: {}", e)))?;
-                
-                let static_key = static_key_decoded
-                    .try_into()
-                    .map_err(|_| Error::Custom("Static key from API has invalid length".to_string()))?;
-                
-                Self::save_key(path.clone(), "static", &static_key)?;
-                (static_key, Some(api_response))
-            }
-        };
-
-        let signing_key = match &api_keys {
-            Some(keys) => {
-                // Use signing key from API
-                let signing_key_decoded = STANDARD
-                    .decode(&keys.signing_key)
-                    .map_err(|e| Error::Custom(format!("Failed to decode signing key from API: {}", e)))?;
-                
-                let signing_key = signing_key_decoded
-                    .try_into()
-                    .map_err(|_| Error::Custom("Signing key from API has invalid length".to_string()))?;
-                
-                Self::save_key(path.clone(), "signing", &signing_key)?;
-                signing_key
-            }
-            None => {
-                // Try to load signing key from disk
-                match Self::load_key(path.clone(), "signing") {
-                    Ok(key) => ed25519_dalek::SigningKey::from(key).to_bytes(),
-                    Err(error) => {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            error = %error.to_string(),
-                            "failed to load signing key, regenerating",
-                        );
-        
-                        Self::create_signing_key(path.clone())?
-                    }
-                }
-            }
-        };
-
-        let (ntcp2_key, ntcp2_iv) = match Self::load_ntcp2_keys(path.clone()) {
-            Ok((key, iv)) => (key, iv),
-            Err(error) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    error = %error.to_string(),
-                    "failed to load ntcp2 keys, regenerating",
-                );
-
-                Self::create_ntcp2_keys(path.clone())?
-            }
-        };
-
-        let (ssu2_static_key, ssu2_intro_key) = match Self::load_ssu2_keys(path.clone()) {
-            Ok((key, iv)) => (key, iv),
-            Err(error) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    error = %error.to_string(),
-                    "failed to load ssu2 keys, regenerating",
-                );
-
-                Self::create_ssu2_keys(path.clone())?
-            }
-        };
 
         // try to find `router.toml` and parse it into `EmissaryConfig`
         //
@@ -582,8 +416,24 @@ impl Config {
         //
         // if the option hasn't been passed, exit early and allow user to take a copy of their
         // config before generating a new config
-        
-        let router_info = Self::load_router_info(path.clone()).ok();
+        let router_config = match Self::load_router_config(path.clone()).await {
+            Err(Error::InvalidData) if arguments.overwrite_config.unwrap_or(false) => None,
+            Err(Error::InvalidData) => return Err(Error::InvalidData),
+            Err(_) => None,
+            Ok(config) => Some(config),
+        };
+
+        let StorageBundle {
+            ntcp2_iv,
+            ntcp2_key,
+            profiles,
+            router_info,
+            routers,
+            signing_key,
+            static_key,
+            ssu2_intro_key,
+            ssu2_static_key,
+        } = storage.load().await;
 
         let mut config = Config::new(
             path.clone(),
@@ -595,130 +445,22 @@ impl Config {
             ssu2_intro_key,
             router_config,
             router_info,
-        )?
+        )
+        .await?
         .merge(arguments);
 
-        config.routers = Self::load_router_infos(&path);
-        config.profiles = Self::load_router_profiles(&path);
+        config.routers = routers;
+        config.profiles = profiles;
 
         Ok(config)
     }
 
-    /// Create static key.
-    fn create_static_key(base_path: PathBuf) -> crate::Result<[u8; 32]> {
-        let key = x25519_dalek::StaticSecret::random();
-        Self::save_key(base_path, "static", &key).map(|_| key.to_bytes())
-    }
-
-    /// Create signing key.
-    fn create_signing_key(base_path: PathBuf) -> crate::Result<[u8; 32]> {
-        let key = ed25519_dalek::SigningKey::generate(&mut OsRng);
-        Self::save_key(base_path, "signing", key.as_bytes()).map(|_| key.to_bytes())
-    }
-
-    /// Create NTCP2 keys and store them on disk.
-    fn create_ntcp2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 16])> {
-        let key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
-        let iv = {
-            let mut iv = [0u8; 16];
-            rand_core::OsRng.fill_bytes(&mut iv);
-
-            iv
-        };
-
-        // append iv to key and write it to disk
-        {
-            let mut combined = vec![0u8; 32 + 16];
-            combined[..32].copy_from_slice(&key);
-            combined[32..].copy_from_slice(&iv);
-
-            let mut file = fs::File::create(path.join("ntcp2.keys"))?;
-            file.write_all(combined.as_ref())?;
-        }
-
-        Ok((TryInto::<[u8; 32]>::try_into(key).expect("to succeed"), iv))
-    }
-
-    /// Create SSU2 keys and store them on disk.
-    fn create_ssu2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 32])> {
-        let static_key = x25519_dalek::StaticSecret::random().to_bytes().to_vec();
-        let intro_key = {
-            let mut intro_key = [0u8; 32];
-            thread_rng().fill_bytes(&mut intro_key);
-
-            intro_key
-        };
-
-        // append iv to key and write it to disk
-        {
-            let mut combined = vec![0u8; 32 + 32];
-            combined[..32].copy_from_slice(&static_key);
-            combined[32..].copy_from_slice(&intro_key);
-
-            let mut file = fs::File::create(path.join("ssu2.keys"))?;
-            file.write_all(combined.as_ref())?;
-        }
-
-        Ok((
-            TryInto::<[u8; 32]>::try_into(static_key).expect("to succeed"),
-            TryInto::<[u8; 32]>::try_into(intro_key).expect("to succeed"),
-        ))
-    }
-
-    /// Save key to disk.
-    fn save_key<K: AsRef<[u8]>>(path: PathBuf, key_type: &str, key: &K) -> crate::Result<()> {
-        let mut file = fs::File::create(path.join(format!("{key_type}.key")))?;
-        file.write_all(key.as_ref())?;
-
-        Ok(())
-    }
-
-    /// Load key from disk.
-    fn load_key(path: PathBuf, key_type: &str) -> crate::Result<[u8; 32]> {
-        let mut file = fs::File::open(path.join(format!("{key_type}.key")))?;
-        let mut key_bytes = [0u8; 32];
-        file.read_exact(&mut key_bytes)?;
-
-        Ok(key_bytes)
-    }
-
-    /// Load NTCP2 key and IV from disk.
-    fn load_ntcp2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 16])> {
-        let key_bytes = {
-            let mut file = fs::File::open(path.join("ntcp2.keys"))?;
-            let mut key_bytes = [0u8; 32 + 16];
-            file.read_exact(&mut key_bytes)?;
-
-            key_bytes
-        };
-
-        Ok((
-            TryInto::<[u8; 32]>::try_into(&key_bytes[..32]).expect("to succeed"),
-            TryInto::<[u8; 16]>::try_into(&key_bytes[32..]).expect("to succeed"),
-        ))
-    }
-
-    /// Load SSU2 static and introduction keys from disk.
-    fn load_ssu2_keys(path: PathBuf) -> crate::Result<([u8; 32], [u8; 32])> {
-        let key_bytes = {
-            let mut file = fs::File::open(path.join("ssu2.keys"))?;
-            let mut key_bytes = [0u8; 32 + 32];
-            file.read_exact(&mut key_bytes)?;
-
-            key_bytes
-        };
-
-        Ok((
-            TryInto::<[u8; 32]>::try_into(&key_bytes[..32]).expect("to succeed"),
-            TryInto::<[u8; 32]>::try_into(&key_bytes[32..]).expect("to succeed"),
-        ))
-    }
-
-    fn load_router_config(path: PathBuf) -> crate::Result<EmissaryConfig> {
-        // parse configuration, if it exists
-        let mut file = fs::File::open(path.join("router.toml"))?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
+    async fn load_router_config(path: PathBuf) -> crate::Result<EmissaryConfig> {
+        let contents = tokio::fs::read_to_string(path.join("router.toml")).await?;
+        // // parse configuration, if it exists
+        // let mut file = fs::File::open(path.join("router.toml"))?;
+        // let mut contents = String::new();
+        // file.read_to_string(&mut contents)?;
 
         toml::from_str::<EmissaryConfig>(&contents).map_err(|error| {
             tracing::warn!(
@@ -731,124 +473,8 @@ impl Config {
         })
     }
 
-    fn load_router_info(path: PathBuf) -> crate::Result<Vec<u8>> {
-        // parse configuration, if it exists
-        let mut file = fs::File::open(path.join("router.info"))?;
-        let mut contents = Vec::new();
-
-        file.read_to_end(&mut contents).map(|_| contents).map_err(From::from)
-    }
-
-    /// Create `netDb` directory.
-    fn create_netdb_dir(path: PathBuf) -> crate::Result<()> {
-        let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
-
-        // create base directory `.emissary/peerProfiles`
-        fs::create_dir_all(&path)?;
-
-        for c in chars.chars() {
-            fs::create_dir_all(path.join(format!("r{c}")))?;
-        }
-
-        Ok(())
-    }
-
-    /// Create `peerProfiles` directory.
-    fn create_profiles_dir(path: PathBuf) -> crate::Result<()> {
-        let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
-
-        // create base directory `.emissary/peerProfiles`
-        fs::create_dir_all(&path)?;
-
-        for c in chars.chars() {
-            fs::create_dir_all(path.join(format!("p{c}")))?;
-        }
-
-        Ok(())
-    }
-
-    /// Create empty config.
-    ///
-    /// Creates a default config with NTCP2 enabled.
-    fn new_empty(base_path: PathBuf) -> crate::Result<Self> {
-        let static_key = Self::create_static_key(base_path.clone())?;
-        let signing_key = Self::create_signing_key(base_path.clone())?;
-        let (ntcp2_key, ntcp2_iv) = Self::create_ntcp2_keys(base_path.clone())?;
-        let (_ssu2_static_key, _ssu2_intro_key) = Self::create_ssu2_keys(base_path.clone())?;
-
-        let config = EmissaryConfig::default();
-        let serialized = toml::to_string(&config).expect("to succeed");
-        let mut file = fs::File::create(base_path.join("router.toml"))?;
-        file.write_all(serialized.as_bytes())?;
-
-        tracing::info!(
-            target: LOG_TARGET,
-            ?base_path,
-            "emissary starting for the first time",
-        );
-
-        Ok(Self {
-            address_book: config.address_book,
-            allow_local: config.allow_local,
-            base_path,
-            caps: config.caps,
-            client_tunnels: config.client_tunnels.unwrap_or(Vec::new()),
-            exploratory: config.exploratory.map(|config| emissary_core::ExploratoryConfig {
-                inbound_len: config.inbound_len,
-                inbound_count: config.inbound_count,
-                outbound_len: config.outbound_len,
-                outbound_count: config.outbound_count,
-            }),
-            floodfill: config.floodfill,
-            http_proxy: config.http_proxy,
-            i2cp_config: config.i2cp.map(|config| emissary_core::I2cpConfig {
-                port: config.port,
-                host: config.host.unwrap_or(String::from("127.0.0.1")),
-            }),
-            insecure_tunnels: config.insecure_tunnels,
-            log: config.log,
-            metrics: config
-                .metrics
-                .map(|config| emissary_core::MetricsConfig { port: config.port }),
-            net_id: config.net_id,
-            ntcp2_config: Some(emissary_core::Ntcp2Config {
-                port: config.ntcp2.as_ref().expect("ntcp").port,
-                host: None,
-                key: ntcp2_key,
-                iv: ntcp2_iv,
-                publish: true,
-            }),
-            port_forwarding: config.port_forwarding,
-            profiles: Vec::new(),
-            reseed: config.reseed,
-            router_info: None,
-            router_ui: config.router_ui,
-            routers: Vec::new(),
-            sam_config: config.sam.map(|config| emissary_core::SamConfig {
-                tcp_port: config.tcp_port,
-                udp_port: config.udp_port,
-                host: config.host.unwrap_or(String::from("127.0.0.1")),
-            }),
-            server_tunnels: config.server_tunnels.unwrap_or(Vec::new()),
-            signing_key,
-            socks_proxy: config.socks_proxy,
-            ssu2_config: None,
-            static_key,
-            transit: config.transit.map(|config| emissary_core::TransitConfig {
-                max_tunnels: config.max_tunnels,
-            }),
-            private_network: config.private_network.map(|config| emissary_core::PrivateNetworkConfig {
-                enabled: config.enabled,
-                known_relays: config.known_relays,
-                min_bandwidth: config.min_bandwidth,
-            }),
-            reseed_api_url: config.reseed_api_url,
-            config: Some(EmissaryConfig::default()),
-        })
-    }
-
     /// Create new [`Config`].
-    fn new(
+    async fn new(
         base_path: PathBuf,
         static_key: [u8; 32],
         signing_key: [u8; 32],
@@ -864,8 +490,9 @@ impl Config {
             None => {
                 let config = EmissaryConfig::default();
                 let toml_config = toml::to_string(&config).expect("to succeed");
-                let mut file = fs::File::create(base_path.join("router.toml"))?;
-                file.write_all(toml_config.as_bytes())?;
+                let mut file = tokio::fs::File::create(base_path.join("router.toml")).await?;
+                file.write_all(toml_config.as_bytes()).await?;
+                file.flush().await?;
 
                 config
             }
@@ -999,118 +626,6 @@ impl Config {
             reseed_api_url: config.reseed_api_url,
             config: Some(config_copy),
         })
-    }
-
-    /// Attempt to load router infos.
-    fn load_router_infos(path: &Path) -> Vec<Vec<u8>> {
-        let Ok(router_dir) = fs::read_dir(path.join("netDb")) else {
-            return Vec::new();
-        };
-
-        router_dir
-            .into_iter()
-            .filter_map(|entry| {
-                let dir = entry.ok()?.path();
-
-                if !dir.is_dir() {
-                    return None;
-                }
-
-                Some(
-                    fs::read_dir(dir)
-                        .ok()?
-                        .filter_map(|entry| {
-                            let file_path = entry.ok()?.path();
-
-                            if !file_path.is_file() {
-                                return None;
-                            }
-
-                            let mut file = fs::File::open(file_path).ok()?;
-
-                            let mut contents = Vec::new();
-                            file.read_to_end(&mut contents).ok()?;
-
-                            Some(contents)
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .flatten()
-            .collect::<Vec<_>>()
-    }
-
-    /// Attempt to load router profiles.
-    fn load_router_profiles(path: &Path) -> Vec<(String, emissary_core::Profile)> {
-        let Ok(profile_dir) = fs::read_dir(path.join("peerProfiles")) else {
-            return Vec::new();
-        };
-
-        profile_dir
-            .into_iter()
-            .filter_map(|entry| {
-                let dir = entry.ok()?.path();
-
-                if !dir.is_dir() {
-                    return None;
-                }
-
-                Some(
-                    fs::read_dir(dir)
-                        .ok()?
-                        .filter_map(|entry| {
-                            let file_path = entry.ok()?.path();
-
-                            if !file_path.is_file() {
-                                return None;
-                            }
-
-                            let mut file = fs::File::open(&file_path).ok()?;
-
-                            let mut contents = String::new();
-                            file.read_to_string(&mut contents).ok()?;
-
-                            let profile = toml::from_str::<Profile>(&contents).ok()?;
-                            let name = {
-                                let input = file_path.to_str().expect("to succeed");
-                                let start = input.find("profile-")?;
-                                let start = start + "profile-".len();
-                                let end = input.find(".toml")?;
-
-                                input[start..end].to_string()
-                            };
-
-                            Some((
-                                name,
-                                emissary_core::Profile {
-                                    last_activity: Duration::from_secs(
-                                        profile.last_activity.unwrap_or(0),
-                                    ),
-                                    last_declined: profile.last_declined.map(Duration::from_secs),
-                                    last_dial_failure: profile
-                                        .last_dial_failure
-                                        .map(Duration::from_secs),
-                                    num_accepted: profile.num_accepted.unwrap_or(0),
-                                    num_connection: profile.num_connection.unwrap_or(0),
-                                    num_dial_failures: profile.num_dial_failures.unwrap_or(0),
-                                    num_lookup_failures: profile.num_lookup_failures.unwrap_or(0),
-                                    num_lookup_no_responses: profile
-                                        .num_lookup_no_responses
-                                        .unwrap_or(0),
-                                    num_lookup_successes: profile.num_lookup_successes.unwrap_or(0),
-                                    num_rejected: profile.num_rejected.unwrap_or(0),
-                                    num_selected: profile.num_selected.unwrap_or(0),
-                                    num_test_failures: profile.num_test_failures.unwrap_or(0),
-                                    num_test_successes: profile.num_test_successes.unwrap_or(0),
-                                    num_unaswered: profile.num_unaswered.unwrap_or(0),
-                                },
-                            ))
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .flatten()
-            .collect::<Vec<_>>()
     }
 
     /// Attempt to merge `arguments` with [`Config`].
@@ -1338,8 +853,8 @@ mod tests {
     };
 
     use super::*;
-    use std::fs::File;
     use tempfile::tempdir;
+    use tokio::io::AsyncReadExt;
 
     fn make_arguments() -> Arguments {
         Arguments {
@@ -1396,10 +911,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fresh_boot_directory_created() {
+    #[tokio::test]
+    async fn fresh_boot_directory_created() {
         let dir = tempdir().unwrap();
-        let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
+        let storage = Storage::new(Some(dir.path().to_owned())).await.unwrap();
+        let config = Config::parse(&make_arguments(), &storage).await.unwrap();
 
         assert!(config.routers.is_empty());
         assert_eq!(config.static_key.len(), 32);
@@ -1417,10 +933,10 @@ mod tests {
         let (key, iv) = {
             let mut path = dir.path().to_owned();
             path.push("ntcp2.keys");
-            let mut file = File::open(&path).unwrap();
+            let mut file = tokio::fs::File::open(&path).await.unwrap();
 
             let mut contents = [0u8; 48];
-            file.read_exact(&mut contents).unwrap();
+            file.read_exact(&mut contents).await.unwrap();
 
             (
                 TryInto::<[u8; 32]>::try_into(&contents[..32]).expect("to succeed"),
@@ -1432,16 +948,17 @@ mod tests {
         assert_eq!(config.ntcp2_config.as_ref().unwrap().iv, iv);
     }
 
-    #[test]
-    fn load_configs_correctly() {
+    #[tokio::test]
+    async fn load_configs_correctly() {
         let dir = tempdir().unwrap();
+        let storage = Storage::new(Some(dir.path().to_owned())).await.unwrap();
 
         let (static_key, signing_key, ntcp2_config) = {
-            let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
+            let config = Config::parse(&make_arguments(), &storage).await.unwrap();
             (config.static_key, config.signing_key, config.ntcp2_config)
         };
 
-        let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
+        let config = Config::parse(&make_arguments(), &storage).await.unwrap();
         assert_eq!(config.static_key, static_key);
         assert_eq!(config.signing_key, signing_key);
         assert_eq!(
@@ -1462,13 +979,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn config_update_works() {
+    #[tokio::test]
+    async fn config_update_works() {
         let dir = tempdir().unwrap();
+        let storage = Storage::new(Some(dir.path().to_owned())).await.unwrap();
 
         // create default config, verify the default ntcp2 port is 8888
         let (ntcp2_key, ntcp2_iv) = {
-            let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
+            let config = Config::parse(&make_arguments(), &storage).await.unwrap();
             let ntcp2_config = config.ntcp2_config.unwrap();
 
             assert!(ntcp2_config.port >= 9151 && ntcp2_config.port <= 30777);
@@ -1491,13 +1009,16 @@ mod tests {
             ..Default::default()
         };
         let config = toml::to_string(&config).expect("to succeed");
-        let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
-        file.write_all(config.as_bytes()).unwrap();
+        let mut file = tokio::fs::File::create(dir.path().to_owned().join("router.toml"))
+            .await
+            .unwrap();
+        file.write_all(config.as_bytes()).await.unwrap();
+        file.flush().await.unwrap();
 
         // load the new config
         //
         // verify that ntcp2 key & iv are the same but port is new
-        let config = Config::parse(Some(dir.path().to_owned()), &make_arguments()).unwrap();
+        let config = Config::parse(&make_arguments(), &storage).await.unwrap();
         let ntcp2_config = config.ntcp2_config.unwrap();
 
         assert_eq!(ntcp2_config.port, 1337u16);
@@ -1505,17 +1026,21 @@ mod tests {
         assert_eq!(ntcp2_config.iv, ntcp2_iv);
     }
 
-    #[test]
-    fn overwrite_config() {
+    #[tokio::test]
+    async fn overwrite_config() {
         let dir = tempdir().unwrap();
+        let storage = Storage::new(Some(dir.path().to_owned())).await.unwrap();
 
-        let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
-        file.write_all("hello, world!".as_bytes()).unwrap();
+        let mut file = tokio::fs::File::create(dir.path().to_owned().join("router.toml"))
+            .await
+            .unwrap();
+        file.write_all("hello, world!".as_bytes()).await.unwrap();
+        file.flush().await.unwrap();
 
         let mut args = make_arguments();
 
         // create default config, verify the default ntcp2 port is 8888
-        match Config::parse(Some(dir.path().to_owned()), &args) {
+        match Config::parse(&args, &storage).await {
             Err(Error::InvalidData) => {}
             _ => panic!("invalid result"),
         }
@@ -1524,7 +1049,7 @@ mod tests {
         args.overwrite_config = Some(true);
 
         // verify default config is created
-        let config = Config::parse(Some(dir.path().to_owned()), &args).unwrap();
+        let config = Config::parse(&args, &storage).await.unwrap();
 
         assert!(config.ntcp2_config.is_some());
         assert!(config.sam_config.is_some());
@@ -1535,9 +1060,10 @@ mod tests {
         assert!(!config.allow_local);
     }
 
-    #[test]
-    fn client_tunnels_with_same_names() {
+    #[tokio::test]
+    async fn client_tunnels_with_same_names() {
         let dir = tempdir().unwrap();
+        let storage = Storage::new(Some(dir.path().to_owned())).await.unwrap();
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
@@ -1561,18 +1087,22 @@ mod tests {
         };
 
         let config = toml::to_string(&config).expect("to succeed");
-        let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
-        file.write_all(config.as_bytes()).unwrap();
+        let mut file = tokio::fs::File::create(dir.path().to_owned().join("router.toml"))
+            .await
+            .unwrap();
+        file.write_all(config.as_bytes()).await.unwrap();
+        file.flush().await.unwrap();
 
-        match Config::parse(Some(dir.path().to_owned()), &make_arguments()) {
+        match Config::parse(&make_arguments(), &storage).await {
             Err(Error::InvalidData) => {}
             _ => panic!("invalid result"),
         }
     }
 
-    #[test]
-    fn client_tunnels_with_same_ports() {
+    #[tokio::test]
+    async fn client_tunnels_with_same_ports() {
         let dir = tempdir().unwrap();
+        let storage = Storage::new(Some(dir.path().to_owned())).await.unwrap();
 
         // create new ntcp2 config where the port is different
         let config = EmissaryConfig {
@@ -1596,10 +1126,13 @@ mod tests {
         };
 
         let config = toml::to_string(&config).expect("to succeed");
-        let mut file = fs::File::create(dir.path().to_owned().join("router.toml")).unwrap();
-        file.write_all(config.as_bytes()).unwrap();
+        let mut file = tokio::fs::File::create(dir.path().to_owned().join("router.toml"))
+            .await
+            .unwrap();
+        file.write_all(config.as_bytes()).await.unwrap();
+        file.flush().await.unwrap();
 
-        match Config::parse(Some(dir.path().to_owned()), &make_arguments()) {
+        match Config::parse(&make_arguments(), &storage).await {
             Err(Error::InvalidData) => {}
             _ => panic!("invalid result"),
         }

@@ -17,7 +17,22 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    config::{Config, I2cpConfig, MetricsConfig, SamConfig}, crypto::{SigningPrivateKey, StaticPrivateKey}, error::Error, events::{EventManager, EventSubscriber}, i2cp::I2cpServer, netdb::NetDb, primitives::RouterInfo, private_network::{self, PrivateNetworkValidator}, profile::ProfileStorage, router::context::RouterContext, runtime::{AddressBook, Runtime, Storage}, sam::SamServer, shutdown::ShutdownContext, subsystem::SubsystemKind, transport::{Ntcp2Transport, Ssu2Transport, TransportManager, TransportManagerBuilder}, tunnel::{TunnelManager, TunnelManagerHandle}
+    config::{Config, I2cpConfig, MetricsConfig, SamConfig}, 
+    private_network::PrivateNetworkValidator,
+    crypto::{SigningPrivateKey, StaticPrivateKey},
+    error::Error,
+    events::{EventManager, EventSubscriber},
+    i2cp::I2cpServer,
+    netdb::NetDb,
+    primitives::{RouterId, RouterInfo},
+    profile::ProfileStorage,
+    router::context::RouterContext,
+    runtime::{AddressBook, Runtime, Storage},
+    sam::SamServer,
+    shutdown::ShutdownContext,
+    subsystem::SubsystemKind,
+    transport::{Ntcp2Transport, Ssu2Transport, TransportManager, TransportManagerBuilder},
+    tunnel::{TunnelManager, TunnelManagerHandle},
 };
 
 use bytes::Bytes;
@@ -122,6 +137,9 @@ pub struct Router<R: Runtime> {
     /// Event manager
     event_manager: EventManager<R>,
 
+    /// Local router ID.
+    router_id: RouterId,
+
     /// Shutdown context.
     shutdown_context: ShutdownContext<R>,
 
@@ -192,7 +210,7 @@ impl<R: Runtime> Router<R> {
             &local_signing_key,
             config.transit.is_none(),
         );
-
+        let router_id = local_router_info.identity.id();
         let Config {
             i2cp_config,
             samv3_config,
@@ -424,6 +442,7 @@ impl<R: Runtime> Router<R> {
             Self {
                 address_info,
                 event_manager,
+                router_id,
                 shutdown_context,
                 shutdown_count: 0usize,
                 transport_manager: transport_manager_builder.build(),
@@ -461,6 +480,11 @@ impl<R: Runtime> Router<R> {
     /// Get reference to [`ProtocolAddressInfo`].
     pub fn protocol_address_info(&self) -> &ProtocolAddressInfo {
         &self.address_info
+    }
+
+    /// Get local router ID.
+    pub fn router_id(&self) -> &RouterId {
+        &self.router_id
     }
 
     /// Add external address for [`Router`].
