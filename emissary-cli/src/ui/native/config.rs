@@ -44,7 +44,7 @@ pub fn load_addresses(path: PathBuf) -> BTreeMap<Arc<str>, Arc<str>> {
             let line = line.ok()?;
             let (key, value) = line.split_once('=')?;
 
-            Some((Arc::from(key), Arc::from(format!("http://{value}.b32.i2p"))))
+            Some((Arc::from(key), Arc::from(format!("http://{value}.b32.echo"))))
         })
         .collect()
 }

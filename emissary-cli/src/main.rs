@@ -367,7 +367,7 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
             // been built), it'll signal the address book that it can start download hosts file(s)
             //
             // additionally, acquire handle to address book which is passed to http proxy so it can
-            // resolve .i2p hosts to .b32.i2p hosts
+            // resolve .echo hosts to .b32.echo hosts
             let (http_proxy_ready_tx, address_book_handle) = match address_book_manager {
                 None => (None, None),
                 Some(address_book_manager) => {
