@@ -63,7 +63,7 @@ const PLAIN_ACK: u32 = 0u32;
 const INITIAL_WINDOW_SIZE: usize = 1usize;
 
 /// Maximum window size in packets.
-const MAX_WINDOW_SIZE: usize = 1024usize; //128usize;
+const MAX_WINDOW_SIZE: usize = 128usize;
 
 /// How far ahead of the current highest received sequence number is a packet accepted.
 const MAX_WINDOW_LOOKAHEAD: usize = 4 * MAX_WINDOW_SIZE;
@@ -90,7 +90,7 @@ const RTTDEV_DAMPENING_FACTOR: f64 = 0.25;
 const EXP_GROWTH_STOP_THRESHOLD: usize = 64;
 
 /// MTU size.
-const MTU_SIZE: usize = 4096; //1812;
+const MTU_SIZE: usize = 1812;
 
 /// Stream event.
 #[derive(Default, Debug, Clone)]
