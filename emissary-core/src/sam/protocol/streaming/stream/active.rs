@@ -60,10 +60,10 @@ const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200);
 const PLAIN_ACK: u32 = 0u32;
 
 /// Initial window size.
-const INITIAL_WINDOW_SIZE: usize = 4usize; //1usize;
+const INITIAL_WINDOW_SIZE: usize = 1usize; //1usize;
 
 /// Maximum window size in packets.
-const MAX_WINDOW_SIZE: usize = 512usize; //128usize;
+const MAX_WINDOW_SIZE: usize = 64usize; //128usize;
 
 /// How far ahead of the current highest received sequence number is a packet accepted.
 const MAX_WINDOW_LOOKAHEAD: usize = 4 * MAX_WINDOW_SIZE;
