@@ -90,7 +90,7 @@ const RTTDEV_DAMPENING_FACTOR: f64 = 0.25;
 const EXP_GROWTH_STOP_THRESHOLD: usize = 128; //64;
 
 /// MTU size.
-const MTU_SIZE: usize = 1812;
+const MTU_SIZE: usize = 4000; //1812;
 
 /// Stream event.
 #[derive(Default, Debug, Clone)]
