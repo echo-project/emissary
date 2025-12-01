@@ -168,7 +168,7 @@ impl<R: Runtime> Ntcp2Session<R> {
             sip,
         } = key_context;
 
-        let (cmd_tx, cmd_rx) = channel(8192); //channel(512);
+        let (cmd_tx, cmd_rx) = channel(4096); //channel(512);
 
         Self {
             cmd_rx,
