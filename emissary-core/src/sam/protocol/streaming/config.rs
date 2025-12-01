@@ -202,7 +202,7 @@ impl Default for StreamConfig {
         Self {
             answer_pings: true,
             blacklist: String::from(""),
-            buffer_size: 64 * 1000,
+            buffer_size: 256 * 1000, //64 * 1000,
             congestion_avoidance_growth_rate_factor: 1,
             connect_delay: None,
             connect_timeout: Some(Duration::from_secs(5 * 60)),
@@ -220,7 +220,7 @@ impl Default for StreamConfig {
             max_conns_per_minute: None,
             max_conns_per_hour: None,
             max_conns_per_day: None,
-            max_message_size: 1730,
+            max_message_size: 3918, //1730,
             max_resends: 8,
             max_total_conns_per_minute: None,
             max_total_conns_per_hour: None,
