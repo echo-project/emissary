@@ -76,7 +76,7 @@ pub use routing_table::{RoutingKindRecycle, RoutingTable};
 const LOG_TARGET: &str = "emissary::tunnel";
 
 /// Default channel size.
-const DEFAULT_CHANNEL_SIZE: usize = 4096; //512;
+const DEFAULT_CHANNEL_SIZE: usize = 8192; //512;
 
 /// Tunnel expiration, 10 minutes.
 const TUNNEL_EXPIRATION: Duration = Duration::from_secs(10 * 60);
