@@ -22,9 +22,11 @@ use crate::{
     LOG_TARGET,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rand::{rngs::OsRng, thread_rng, Rng, RngCore};
-use emissary_util::storage::{Storage, StorageBundle};
+use emissary_util::{
+    port_mapper::PortMapperConfig,
+    storage::{Storage, StorageBundle},
+};
+use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
@@ -132,6 +134,16 @@ pub struct PortForwardingConfig {
     pub nat_pmp: bool,
     pub upnp: bool,
     pub name: String,
+}
+
+impl From<PortForwardingConfig> for PortMapperConfig {
+    fn from(value: PortForwardingConfig) -> Self {
+        PortMapperConfig {
+            nat_pmp: value.nat_pmp,
+            upnp: value.upnp,
+            name: value.name,
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy, clap::ValueEnum, Serialize, Deserialize)]
@@ -318,7 +330,7 @@ pub struct Config {
     pub ntcp2_config: Option<emissary_core::Ntcp2Config>,
 
     /// Port forwarding config.
-    pub port_forwarding: Option<PortForwardingConfig>,
+    pub port_forwarding: Option<PortMapperConfig>,
 
     /// Profiles.
     pub profiles: Vec<(String, emissary_core::Profile)>,
@@ -593,7 +605,7 @@ impl Config {
                 key: ntcp2_key,
                 iv: ntcp2_iv,
             }),
-            port_forwarding: config.port_forwarding,
+            port_forwarding: config.port_forwarding.map(From::from),
             profiles: Vec::new(),
             reseed: config.reseed,
             router_info,
@@ -800,7 +812,7 @@ impl Config {
             self.transit = None;
         }
 
-        if let Some(PortForwardingConfig {
+        if let Some(PortMapperConfig {
             nat_pmp,
             upnp,
             name,

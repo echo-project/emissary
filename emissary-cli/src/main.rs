@@ -20,7 +20,13 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::{
-    address_book::{AddressBookHandle, AddressBookManager}, cli::Arguments, config::{Config, EmissaryConfig, ReseedConfig, RouterUiConfig}, error::Error, port_mapper::PortMapper, proxy::{http::HttpProxy, socks::SocksProxy}, tools::reseed_api::{StoreNetdbRequest, UpdateRouterInfoRequest, get_relay_routers_async}, tunnel::{client::ClientTunnelManager, server::ServerTunnelManager}
+    address_book::{AddressBookHandle, AddressBookManager},
+    cli::Arguments,
+    config::{Config, EmissaryConfig, ReseedConfig, RouterUiConfig},
+    error::Error,
+    proxy::{http::HttpProxy, socks::SocksProxy},
+    tunnel::{client::ClientTunnelManager, server::ServerTunnelManager},
+    tools::reseed_api::{StoreNetdbRequest, UpdateRouterInfoRequest, get_relay_routers_async}, 
 };
 
 use anyhow::anyhow;
@@ -29,7 +35,8 @@ use emissary_core::{
     events::EventSubscriber, primitives::{RouterId, RouterInfo}, router::Router, runtime::AddressBook,
 };
 use emissary_util::{
-    reseeder::Reseeder, runtime::tokio::Runtime, storage::Storage, su3::ReseedRouterInfo,
+    port_mapper::PortMapper, reseeder::Reseeder, runtime::tokio::Runtime, storage::Storage,
+    su3::ReseedRouterInfo,
 };
 use futures::{channel::oneshot, StreamExt};
 use tokio::sync::mpsc::{channel, Receiver};
@@ -41,7 +48,6 @@ mod cli;
 mod config;
 mod error;
 mod logger;
-mod port_mapper;
 mod proxy;
 mod tools;
 mod tunnel;
@@ -167,28 +173,16 @@ async fn setup_router(arguments: Arguments) -> anyhow::Result<RouterContext> {
                     "router reseeded",
                 );
 
-                routers.into_iter().for_each(|ReseedRouterInfo { name, router_info }| {
-                    match name.strip_prefix("routerInfo-") {
-                        Some(start) => {
-                            if let Err(error) =
-                                storage.store_router_info(start.to_string(), router_info.clone())
-                            {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    ?error,
-                                    "failed to store router info to disk",
-                                );
-                            }
-                        }
-                        None => tracing::warn!(
+                for ReseedRouterInfo { name, router_info } in routers {
+                    if let Err(error) = storage.store_router_info(name, router_info.clone()).await {
+                        tracing::warn!(
                             target: LOG_TARGET,
-                            ?name,
-                            "malformed router info name, cannot store on disk",
-                        ),
+                            ?error,
+                            "failed to store router info to disk",
+                        );
                     }
-
                     config.routers.push(router_info);
-                });
+                }
             }
             Err(error) if config.routers.is_empty() => {
                 tracing::error!(

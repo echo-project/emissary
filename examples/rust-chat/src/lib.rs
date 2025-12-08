@@ -16,12 +16,5 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-#![allow(clippy::manual_async_fn)]
-
-mod certificates;
-
-pub mod port_mapper;
-pub mod reseeder;
-pub mod runtime;
-pub mod storage;
-pub mod su3;
+/// Network ID for I2P devnet.
+pub const DEVNET_ID: u8 = 0xab;
