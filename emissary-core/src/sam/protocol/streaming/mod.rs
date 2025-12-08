@@ -43,7 +43,7 @@ use hashbrown::{HashMap, HashSet};
 use rand_core::RngCore;
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
-use alloc::{collections::VecDeque, format, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, format, string::String, vec, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
@@ -227,7 +227,7 @@ struct PendingOutboundStream<R: Runtime> {
     silent: bool,
 
     /// SAMv3 client socket that was used to send `STREAM CONNECT` command.
-    socket: SamSocket<R>,
+    socket: Box<SamSocket<R>>,
 
     /// Source port.
     src_port: u16,
@@ -435,6 +435,7 @@ impl<R: Runtime> StreamManager<R> {
                 },
                 recv_stream_id,
                 destination_id.clone(),
+                None,
                 StreamKind::Outbound {
                     dst_port,
                     send_stream_id,
@@ -490,6 +491,7 @@ impl<R: Runtime> StreamManager<R> {
                 socket,
                 recv_stream_id,
                 destination.id(),
+                Some(destination.clone()),
                 StreamKind::Inbound {
                     payload: payload.to_vec(),
                 },
@@ -508,12 +510,13 @@ impl<R: Runtime> StreamManager<R> {
                 let destination_id = destination.id();
 
                 let (pending, packet) = PendingStream::new(
-                    self.destination.clone(),
-                    destination_id.clone(),
+                    &self.destination,
+                    destination.clone(),
                     recv_stream_id,
                     payload.to_vec(),
                     &self.signing_key,
                 );
+
                 let _ = self.outbound_tx.try_send((
                     DeliveryStyle::Unspecified {
                         destination_id: destination_id.clone(),
@@ -546,6 +549,7 @@ impl<R: Runtime> StreamManager<R> {
         socket: SocketKind<R>,
         recv_stream_id: u32,
         destination_id: DestinationId,
+        destination: Option<Destination>,
         stream_kind: StreamKind,
     ) {
         // create context for the stream
@@ -567,8 +571,15 @@ impl<R: Runtime> StreamManager<R> {
         // if the socket wasn't configured to be silent, send the remote's destination
         // to client before the socket is convered into a regural tcp stream
         let initial_message = match &socket {
+            // `destination` must exist if this is an inbound stream
             SocketKind::Accept { silent, .. } | SocketKind::Forwarded { silent, .. } if !silent =>
-                Some(format!("{}\n", base64_encode(context.remote.to_vec())).into_bytes()),
+                Some(
+                    format!(
+                        "{}\n",
+                        base64_encode(destination.expect("to exist").serialized())
+                    )
+                    .into_bytes(),
+                ),
             SocketKind::Connect { silent, .. } if !silent =>
                 Some(b"STREAM STATUS RESULT=OK\n".to_vec()),
             _ => None,
@@ -719,6 +730,7 @@ impl<R: Runtime> StreamManager<R> {
 
             // stream must exist since it was checked earlier that it's in the map
             let PendingStream {
+                remote_destination,
                 destination_id,
                 send_stream_id,
                 packets,
@@ -731,6 +743,7 @@ impl<R: Runtime> StreamManager<R> {
                 socket,
                 stream_id,
                 destination_id,
+                Some(remote_destination),
                 StreamKind::InboundPending {
                     send_stream_id,
                     seq_nro,
@@ -907,7 +920,7 @@ impl<R: Runtime> StreamManager<R> {
         &mut self,
         destination_id: DestinationId,
         mut routing_path_handle: RoutingPathHandle<R>,
-        socket: SamSocket<R>,
+        socket: Box<SamSocket<R>>,
         options: HashMap<String, String>,
     ) -> (u32, BytesMut, DeliveryStyle, u16, u16) {
         let silent = options
@@ -940,7 +953,7 @@ impl<R: Runtime> StreamManager<R> {
             .with_replay_protection(&destination_id)
             .with_synchronize()
             .with_signature()
-            .with_from_included(self.destination.clone())
+            .with_from_included(&self.destination)
             .build_and_sign(&self.signing_key);
 
         tracing::debug!(
@@ -1282,6 +1295,8 @@ mod tests {
         net::TcpListener,
     };
 
+    use alloc::boxed::Box;
+
     struct SocketFactory {
         listener: TcpListener,
     }
@@ -1293,13 +1308,13 @@ mod tests {
             }
         }
 
-        pub async fn socket(&self) -> (SamSocket<MockRuntime>, tokio::net::TcpStream) {
+        pub async fn socket(&self) -> (Box<SamSocket<MockRuntime>>, tokio::net::TcpStream) {
             let address = self.listener.local_addr().unwrap();
             let (stream1, stream2) =
                 tokio::join!(self.listener.accept(), MockTcpStream::connect(address));
             let (stream, _) = stream1.unwrap();
 
-            (SamSocket::new(stream2.unwrap()), stream)
+            (Box::new(SamSocket::new(stream2.unwrap())), stream)
         }
     }
 
@@ -1310,7 +1325,7 @@ mod tests {
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
 
         let (_stream, _) = stream1.unwrap();
-        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let socket = Box::new(SamSocket::<MockRuntime>::new(stream2.unwrap()));
 
         let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
@@ -1341,7 +1356,7 @@ mod tests {
                     .with_synchronize()
                     .with_send_stream_id(0u32)
                     .with_replay_protection(&destination_id)
-                    .with_from_included(destination)
+                    .with_from_included(&destination)
                     .with_signature()
                     .build_and_sign(&signing_key);
 
@@ -1441,7 +1456,7 @@ mod tests {
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&destination_id)
-            .with_from_included(destination)
+            .with_from_included(&destination)
             .with_signature()
             .build_and_sign(&signing_key)
             .to_vec();
@@ -1461,7 +1476,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
         let (_stream, _) = stream1.unwrap();
-        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let socket = Box::new(SamSocket::<MockRuntime>::new(stream2.unwrap()));
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
@@ -1506,22 +1521,25 @@ mod tests {
 
     #[tokio::test]
     async fn pending_stream_initialized_with_non_silent_listener() {
-        let signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
-        let destination = Destination::new::<MockRuntime>(signing_key.public());
-        let destination_id = destination.id();
-        let mut manager = StreamManager::<MockRuntime>::new(destination, signing_key);
+        let local_signing_key = SigningPrivateKey::from_bytes(&[0u8; 32]).unwrap();
+        let local_destination = Destination::new::<MockRuntime>(local_signing_key.public());
+        let destination_id = local_destination.id();
+        let mut manager =
+            StreamManager::<MockRuntime>::new(local_destination.clone(), local_signing_key);
 
         // register new inbound stream and since there are no listener, the stream will be pending
-        let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
-        let destination = Destination::new::<MockRuntime>(signing_key.public());
-        let remote_destination_id = destination.id();
+        let remote_signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let remote_destination = Destination::new::<MockRuntime>(remote_signing_key.public());
+        let serialized = base64_encode(remote_destination.serialize().to_vec());
+
+        let remote_destination_id = remote_destination.id();
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&destination_id)
-            .with_from_included(destination)
+            .with_from_included(&remote_destination)
             .with_signature()
-            .build_and_sign(&signing_key)
+            .build_and_sign(&remote_signing_key)
             .to_vec();
 
         assert!(manager
@@ -1538,14 +1556,23 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
-        let (_stream, _) = stream1.unwrap();
-        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let (stream, _) = stream1.unwrap();
+        let socket = Box::new(SamSocket::<MockRuntime>::new(stream2.unwrap()));
+        let mut routing_path_manager =
+            RoutingPathManager::<MockRuntime>::new(destination_id, vec![]);
+        let pending_routing_path_handle = routing_path_manager.pending_handle();
+
+        // spawn routing path in the background
+        //
+        // it't not used in the test but must be polled in order for the listener to
+        // acquire a routing path to remote destination
+        tokio::spawn(async move { while routing_path_manager.next().await.is_some() {} });
 
         assert!(manager
             .register_listener(ListenerKind::Ephemeral {
                 socket,
                 silent: false,
-                pending_routing_path_handle: PendingRoutingPathHandle::create(),
+                pending_routing_path_handle,
             })
             .is_ok());
         assert!(!manager.pending_inbound.is_empty());
@@ -1575,6 +1602,25 @@ mod tests {
             }
             _ => panic!("invalid event"),
         }
+
+        // spawn stream manager in the background so it makes progress
+        tokio::spawn(async move { while manager.next().await.is_some() {} });
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+
+        // read stream status
+        {
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response, String::from("STREAM STATUS RESULT=OK\n"));
+        }
+
+        // read destination
+        {
+            response.clear();
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response.trim_end(), serialized);
+        }
     }
 
     #[tokio::test]
@@ -1587,12 +1633,13 @@ mod tests {
         // register new inbound stream and since there are no listener, the stream will be pending
         let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
+        let serialized = base64_encode(destination.serialized());
         let remote_destination_id = destination.id();
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&destination_id)
-            .with_from_included(destination)
+            .with_from_included(&destination)
             .with_signature()
             .build_and_sign(&signing_key)
             .to_vec();
@@ -1613,14 +1660,23 @@ mod tests {
         let port = address.port();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
         let (stream, _) = stream1.unwrap();
-        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let socket = Box::new(SamSocket::<MockRuntime>::new(stream2.unwrap()));
+        let mut routing_path_manager =
+            RoutingPathManager::<MockRuntime>::new(destination_id, vec![]);
+        let pending_routing_path_handle = routing_path_manager.pending_handle();
+
+        // spawn routing path in the background
+        //
+        // it't not used in the test but must be polled in order for the listener to
+        // acquire a routing path to remote destination
+        tokio::spawn(async move { while routing_path_manager.next().await.is_some() {} });
 
         assert!(manager
             .register_listener(ListenerKind::Persistent {
                 socket,
                 port,
                 silent: false,
-                pending_routing_path_handle: PendingRoutingPathHandle::create(),
+                pending_routing_path_handle,
             })
             .is_ok());
         assert!(!manager.pending_inbound.is_empty());
@@ -1651,11 +1707,27 @@ mod tests {
             _ => panic!("invalid event"),
         }
 
-        let mut reader = BufReader::new(stream);
-        let mut response = String::new();
-        reader.read_line(&mut response).await.unwrap();
+        // spawn stream manager in the background so it makes progress
+        tokio::spawn(async move { while manager.next().await.is_some() {} });
 
-        assert_eq!(response.as_str(), "STREAM STATUS RESULT=OK\n");
+        // read stream status
+        {
+            let mut reader = BufReader::new(stream);
+            let mut response = String::new();
+
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response, String::from("STREAM STATUS RESULT=OK\n"));
+        }
+
+        // read destination
+        {
+            let (inbound_stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(inbound_stream);
+            let mut response = String::new();
+
+            reader.read_line(&mut response).await.unwrap();
+            assert_eq!(response.trim_end(), serialized);
+        }
     }
 
     #[tokio::test]
@@ -1673,7 +1745,7 @@ mod tests {
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&destination_id)
-            .with_from_included(destination)
+            .with_from_included(&destination)
             .with_signature()
             .build_and_sign(&signing_key)
             .to_vec();
@@ -1778,7 +1850,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (stream1, stream2) = tokio::join!(listener.accept(), MockTcpStream::connect(address));
         let (mut stream, _) = stream1.unwrap();
-        let socket = SamSocket::<MockRuntime>::new(stream2.unwrap());
+        let socket = Box::new(SamSocket::<MockRuntime>::new(stream2.unwrap()));
 
         let outbound = TunnelId::random();
         let inbound = Lease::random();
@@ -2004,7 +2076,7 @@ mod tests {
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&manager.destination.id())
-            .with_from_included(destination.clone())
+            .with_from_included(&destination)
             .with_signature()
             .with_payload(b"hello, world")
             .build_and_sign(&signing_key)
@@ -2065,12 +2137,12 @@ mod tests {
 
         let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
-        let destination_id = base64_encode(destination.id().to_vec());
+        let serialized = base64_encode(destination.serialized());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&manager.destination.id())
-            .with_from_included(destination.clone())
+            .with_from_included(&destination)
             .with_signature()
             .with_payload(b"hello, world\n")
             .build_and_sign(&signing_key)
@@ -2117,7 +2189,7 @@ mod tests {
         // read remote's destination id
         response.clear();
         reader.read_line(&mut response).await.unwrap();
-        assert_eq!(response, format!("{destination_id}\n"));
+        assert_eq!(response, format!("{serialized}\n"));
 
         // read payload from syn packet
         response.clear();
@@ -2137,12 +2209,12 @@ mod tests {
 
         let signing_key = SigningPrivateKey::from_bytes(&[1u8; 32]).unwrap();
         let destination = Destination::new::<MockRuntime>(signing_key.public());
-        let destination_id = base64_encode(destination.id().to_vec());
+        let serialized = base64_encode(destination.serialized());
         let packet = PacketBuilder::new(1337u32)
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&manager.destination.id())
-            .with_from_included(destination.clone())
+            .with_from_included(&destination)
             .with_signature()
             .with_payload(b"hello, world\n")
             .build_and_sign(&signing_key)
@@ -2190,7 +2262,7 @@ mod tests {
         // read remote's destination id
         response.clear();
         reader.read_line(&mut response).await.unwrap();
-        assert_eq!(response, format!("{destination_id}\n"));
+        assert_eq!(response, format!("{serialized}\n"));
 
         // read payload from syn packet
         response.clear();
@@ -2214,7 +2286,7 @@ mod tests {
             .with_synchronize()
             .with_send_stream_id(0u32)
             .with_replay_protection(&manager.destination.id())
-            .with_from_included(destination.clone())
+            .with_from_included(&destination)
             .with_signature()
             .with_payload(b"hello, world\n")
             .build_and_sign(&signing_key)
@@ -2401,7 +2473,7 @@ mod tests {
                 .with_synchronize()
                 .with_send_stream_id(0u32)
                 .with_replay_protection(&manager.destination.id())
-                .with_from_included(destination)
+                .with_from_included(&destination)
                 .with_payload(b"hello, world\n")
                 .build()
                 .to_vec()
@@ -2435,7 +2507,7 @@ mod tests {
                 .with_send_stream_id(0u32)
                 .with_synchronize()
                 .with_signature()
-                .with_from_included(destination.clone())
+                .with_from_included(&destination)
                 .build_and_sign(&signing_key)
         };
 
@@ -2602,7 +2674,7 @@ mod tests {
                 .with_replay_protection(&DestinationId::random())
                 .with_synchronize()
                 .with_signature()
-                .with_from_included(destination.clone())
+                .with_from_included(&destination)
                 .build_and_sign(&signing_key)
                 .to_vec()
         };

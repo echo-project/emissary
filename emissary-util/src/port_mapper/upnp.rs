@@ -16,7 +16,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::config::PortForwardingConfig;
+use crate::port_mapper::PortMapperConfig;
 
 use igd_next::{
     aio::{
@@ -36,7 +36,7 @@ use std::{
 // TODO: use `tokio::spawn_blocking()` for `netdev` calls
 
 /// Logging target for the file
-const LOG_TARGET: &str = "emissary::port-mapper::upnp";
+const LOG_TARGET: &str = "emissary-util::port-mapper::upnp";
 
 /// Timeout for responses.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,7 +55,7 @@ pub struct PortMapper {
     address_tx: mpsc::Sender<Ipv4Addr>,
 
     /// Port forwarding config.
-    config: PortForwardingConfig,
+    config: PortMapperConfig,
 
     /// NTCP2 port, if the transport was enabled.
     ntcp2_port: Option<u16>,
@@ -70,7 +70,7 @@ pub struct PortMapper {
 impl PortMapper {
     /// Create new UPnP [`PortMapper`].
     pub fn new(
-        config: PortForwardingConfig,
+        config: PortMapperConfig,
         ntcp2_port: Option<u16>,
         ssu2_port: Option<u16>,
         address_tx: mpsc::Sender<Ipv4Addr>,
