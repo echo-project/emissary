@@ -75,10 +75,10 @@ const CHOKING_REQUEST: u16 = 60_001u16;
 const MAX_NACKS: usize = 255usize;
 
 /// Initial RTO.
-const INITIAL_RTO: Duration = Duration::from_millis(2000); //9000
+const INITIAL_RTO: Duration = Duration::from_millis(9000); //9000
 
 /// Initial RTT.
-const INITIAL_RTT: Duration = Duration::from_millis(1000); //8000
+const INITIAL_RTT: Duration = Duration::from_millis(8000); //8000
 
 /// RTT dampening factor (alpha).
 const RTT_DAMPENING_FACTOR: f64 = 0.125f64;
@@ -769,8 +769,8 @@ impl<R: Runtime> Stream<R> {
             if self.window_size < EXP_GROWTH_STOP_THRESHOLD {
                 self.window_size *= 2;
             } else if self.window_size < MAX_WINDOW_SIZE {
-                // self.window_size += 1;
-                self.window_size += 4;
+                self.window_size += 1;
+                // self.window_size += 4;
             }
         }
     }
