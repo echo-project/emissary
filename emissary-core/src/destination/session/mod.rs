@@ -69,10 +69,10 @@ mod tag_set;
 const LOG_TARGET: &str = "emissary::destination::session";
 
 /// Number of garlic tags to generate.
-const NUM_TAGS_TO_GENERATE: usize = 8192; //4096;
+const NUM_TAGS_TO_GENERATE: usize = 4096;
 
 /// Default number of tag set entries consumed per key before a DH ratchet is performed.
-const SESSION_DH_RATCHET_THRESHOLD: u16 = 50_000u16; //20_000u16;
+const SESSION_DH_RATCHET_THRESHOLD: u16 = 20_000u16;
 
 /// How long is upper-layer protocol data awaited before a [`DatabaseStore`] message is sent to
 /// remote to update remote destination's `NetDb` with our new lease set.
