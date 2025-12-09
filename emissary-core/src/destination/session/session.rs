@@ -64,7 +64,7 @@ const NSR_CONTEXT_MAX_AGE: Duration = Duration::from_secs(3 * 60);
 const PREV_TAG_MAX_AGE: Duration = Duration::from_secs(3 * 60);
 
 /// Number of extra tags to generate from the old tag set when it's about to expire.
-const NUM_EXTRA_TAGS_TO_GENERATE: usize = 128usize;
+const NUM_EXTRA_TAGS_TO_GENERATE: usize = 1024usize; //128usize;
 
 /// Event emitted by [`PendingSession`].
 pub enum PendingSessionEvent<R: Runtime> {
