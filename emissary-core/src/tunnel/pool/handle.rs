@@ -264,7 +264,7 @@ impl TunnelPoolHandle {
         message_tx: mpsc::Sender<TunnelMessage, TunnelMessageRecycle>,
     ) -> (Self, mpsc::Sender<TunnelPoolEvent>, oneshot::Receiver<()>) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let (event_tx, event_rx) = mpsc::channel(64);
+        let (event_tx, event_rx) = mpsc::channel(8192); //64
 
         (
             Self {
