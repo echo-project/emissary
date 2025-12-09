@@ -38,7 +38,7 @@ use emissary_util::{
     port_mapper::PortMapper, reseeder::Reseeder, runtime::tokio::Runtime, storage::Storage,
     su3::ReseedRouterInfo,
 };
-use futures::{channel::oneshot, StreamExt};
+use futures::{channel::oneshot, future, StreamExt};
 use tokio::sync::mpsc::{channel, Receiver};
 
 use std::{fs::File, io::Write, mem, pin::Pin, sync::Arc, path::PathBuf};
@@ -537,21 +537,15 @@ async fn router_event_loop(
                 // router.add_external_address(address.expect("value"));
             },
             _ = async {
-                    loop {
-                        let mut router_guard = router.lock().await;
-                        let mut pinned_router = Pin::new(&mut *router_guard);
-                        let waker = futures::task::noop_waker();
-                        let mut cx = std::task::Context::from_waker(&waker);
-                        match pinned_router.as_mut().poll(&mut cx) {
-                            std::task::Poll::Ready(()) => return (),
-                            std::task::Poll::Pending => {
-                                drop(router_guard);
-                                tokio::task::yield_now().await;
-                            }
-                        }
-                    }
-                } => {
-            // _ = &mut router => {
+                // Poll router properly using tokio's async mechanism
+                future::poll_fn(|cx| {
+                    let mut router_guard = match router.try_lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return std::task::Poll::Pending,
+                    };
+                    Pin::new(&mut *router_guard).poll(cx)
+                }).await
+            } => {
                 tracing::info!(
                     target: LOG_TARGET,
                     "emissary shut down",
@@ -580,7 +574,13 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(feature = "web-ui")]
 fn main() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Runtime::new()?;
+    // let runtime = tokio::runtime::Runtime::new()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_cpus::get())  // Use all CPU cores
+        .enable_all()
+        .thread_stack_size(4 * 1024 * 1024)  // 4MB stack per thread
+        .build()?;
+    
     let (shutdown_tx, shutdown_rx) = channel(1);
     let arguments = runtime.block_on(parse_arguments());
     let RouterContext {
