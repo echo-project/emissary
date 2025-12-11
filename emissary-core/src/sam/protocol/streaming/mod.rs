@@ -64,12 +64,12 @@ const LOG_TARGET: &str = "emissary::streaming";
 /// [`StreamManager`]'s message channel size.
 ///
 /// Size of the channel used by all virtual streams to send messages to the network.
-const STREAM_MANAGER_CHANNEL_SIZE: usize = 8192; //4096;
+const STREAM_MANAGER_CHANNEL_SIZE: usize = 4096;
 
 /// [`Stream`]'s message channel size.
 ///
 /// Size of the channel used to send messages received from the network to a virtual stream.
-const STREAM_CHANNEL_SIZE: usize = 2048; //512;
+const STREAM_CHANNEL_SIZE: usize = 512;
 
 /// How long are streams kept in the pending state before they are pruned and rejected.
 const PENDING_STREAM_PRUNE_THRESHOLD: Duration = Duration::from_secs(30);
