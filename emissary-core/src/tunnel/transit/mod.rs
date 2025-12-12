@@ -79,7 +79,7 @@ const PUBLIC_KEY_OFFSET: Range<usize> = 16..48;
 const RECORD_START_OFFSET: RangeFrom<usize> = 48..;
 
 /// Transit tunnel channel size.
-const TUNNEL_CHANNEL_SIZE: usize = 2048usize; //64usize;
+const TUNNEL_CHANNEL_SIZE: usize = 4096usize; //2048usize; //64usize;
 
 /// Transit tunnel expiration.
 ///
