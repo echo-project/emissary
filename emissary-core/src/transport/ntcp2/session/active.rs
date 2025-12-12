@@ -177,7 +177,7 @@ impl<R: Runtime> Ntcp2Session<R> {
             event_handle,
             inbound_bandwidth: 0usize,
             outbound_bandwidth: 0usize,
-            read_buffer: vec![0u8; 0xffff],
+            read_buffer: vec![0u8; 0x3ffff], //vec![0u8; 0xffff],
             read_state: ReadState::ReadSize { offset: 0usize },
             recv_cipher: ChaChaPoly::new(&recv_key),
             role,
