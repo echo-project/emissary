@@ -60,7 +60,7 @@ const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200); //200
 const PLAIN_ACK: u32 = 0u32;
 
 /// Initial window size.
-const INITIAL_WINDOW_SIZE: usize = 32usize; //1usize;
+const INITIAL_WINDOW_SIZE: usize = 16usize; //1usize;
 
 /// Maximum window size in packets.
 const MAX_WINDOW_SIZE: usize = 256usize; //128usize;
