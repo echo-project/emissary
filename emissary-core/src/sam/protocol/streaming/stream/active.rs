@@ -51,10 +51,10 @@ use core::{
 const LOG_TARGET: &str = "emissary::streaming::active";
 
 /// Read buffer size.
-const READ_BUFFER_SIZE: usize = 0x3ffff; //0xffff;
+const READ_BUFFER_SIZE: usize = 0x7ffff; //0xffff;
 
 /// Initial ACK delay.
-const INITIAL_ACK_DELAY: Duration = Duration::from_millis(50); //200
+const INITIAL_ACK_DELAY: Duration = Duration::from_millis(20); //200
 
 /// Sequence number for a plain ACK message.
 const PLAIN_ACK: u32 = 0u32;
@@ -75,10 +75,10 @@ const CHOKING_REQUEST: u16 = 60_001u16;
 const MAX_NACKS: usize = 255usize;
 
 /// Initial RTO.
-const INITIAL_RTO: Duration = Duration::from_millis(3000); //9000
+const INITIAL_RTO: Duration = Duration::from_millis(2000); //9000
 
 /// Initial RTT.
-const INITIAL_RTT: Duration = Duration::from_millis(2000); //8000
+const INITIAL_RTT: Duration = Duration::from_millis(1000); //8000
 
 /// RTT dampening factor (alpha).
 const RTT_DAMPENING_FACTOR: f64 = 0.125f64;
