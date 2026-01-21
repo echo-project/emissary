@@ -21,8 +21,8 @@ use crate::{
     error::{ChannelError, Ssu2Error},
     primitives::{RouterId, RouterInfo, TransportKind},
     router::context::RouterContext,
-    runtime::{Counter, Gauge, Histogram, JoinSet, MetricsHandle, Runtime},
-    subsystem::SubsystemHandle,
+    runtime::{Counter, Gauge, Histogram, JoinSet, MetricsHandle, Runtime, UdpSocket},
+    subsystem::SubsystemEvent,
     transport::{
         ssu2::{
             message::{HeaderKind, HeaderReader},
@@ -38,18 +38,17 @@ use crate::{
             },
             Packet,
         },
-        Direction, TransportEvent,
+        Direction, TerminationReason, TransportEvent,
     },
-    util::udp::{UdpSocket, UdpSocketHandle},
 };
 
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 use rand_core::RngCore;
-use thingbuf::mpsc::{channel, errors::TrySendError, Receiver, Sender};
+use thingbuf::mpsc::{channel, errors::TrySendError, Sender};
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 use core::{
     fmt, mem,
     net::SocketAddr,
@@ -68,10 +67,8 @@ const PROTOCOL_NAME: &str = "Noise_XKchaobfse+hs1+hs2+hs3_25519_ChaChaPoly_SHA25
 /// This is the channel from [`Ssu2Socket`] to a pending/active SSU2 session.
 const CHANNEL_SIZE: usize = 256usize;
 
-/// SSU2 packet channel size.
-///
-/// Used to receive datagrams from active sessions.
-const PKT_CHANNEL_SIZE: usize = 8192usize;
+/// Maximum datagram size.
+const DATAGRAM_MAX_SIZE: usize = 0xfff;
 
 /// Pending session kind.
 enum PendingSessionKind {
@@ -91,6 +88,9 @@ enum PendingSessionKind {
         /// This is the connection ID selected by the remote router and is used to remove pending
         /// session context in case it's rejected by the `TransportManager`.
         dst_id: u64,
+
+        /// Key for decrypting the header of `SessionConfirmed` message.
+        k_header_2: [u8; 32],
     },
 
     /// Pending outbound session.
@@ -161,7 +161,7 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Active sessions.
     ///
     /// The session returns a `(RouterId, destination connection ID)` tuple when it exits.
-    active_sessions: R::JoinSet<TerminationContext>,
+    active_sessions: R::JoinSet<TerminationContext<R>>,
 
     /// Chaining key.
     chaining_key: Bytes,
@@ -186,11 +186,8 @@ pub struct Ssu2Socket<R: Runtime> {
     /// Pending SSU2 sessions.
     pending_sessions: R::JoinSet<PendingSsu2SessionStatus<R>>,
 
-    /// RX channel for receiving packets from active sessions.
-    pkt_rx: Receiver<Packet>,
-
-    /// TX channel given to active sessions.
-    pkt_tx: Sender<Packet>,
+    /// Datagram read buffer.
+    read_buffer: Vec<u8>,
 
     /// Router context.
     router_ctx: RouterContext<R>,
@@ -198,17 +195,18 @@ pub struct Ssu2Socket<R: Runtime> {
     /// SSU2 sessions.
     sessions: HashMap<u64, Sender<Packet>>,
 
-    /// UDP socket handle.
-    socket_handle: UdpSocketHandle,
+    /// UDP socket.
+    socket: R::UdpSocket,
 
     /// Static key.
     static_key: StaticPrivateKey,
 
-    /// Subsystem handle.
-    subsystem_handle: SubsystemHandle,
-
     /// Terminating sessions.
     terminating_session: R::JoinSet<(RouterId, u64)>,
+
+    /// TX channel for sending events to `SubsystemManager`.
+    #[allow(unused)]
+    transport_tx: Sender<SubsystemEvent>,
 
     /// Unvalidated sessions.
     unvalidated_sessions: HashMap<RouterId, PendingSessionKind>,
@@ -226,7 +224,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         socket: R::UdpSocket,
         static_key: StaticPrivateKey,
         intro_key: [u8; 32],
-        subsystem_handle: SubsystemHandle,
+        transport_tx: Sender<SubsystemEvent>,
         router_ctx: RouterContext<R>,
     ) -> Self {
         let state = Sha256::new().update(PROTOCOL_NAME.as_bytes()).finalize();
@@ -237,15 +235,6 @@ impl<R: Runtime> Ssu2Socket<R> {
             .update(static_key.public().to_vec())
             .finalize();
 
-        // create channel pair which is used to exchange outbound packets
-        // with active sessions and `Ssu2Socket`
-        //
-        // TODO: implement `Clone` for `R::UdpSocket`
-        let (pkt_tx, pkt_rx) = channel(PKT_CHANNEL_SIZE);
-
-        let (socket, socket_handle) = UdpSocket::<R>::new(socket);
-        R::spawn(socket.run());
-
         Self {
             active_sessions: R::join_set(),
             chaining_key: Bytes::from(chaining_key),
@@ -255,14 +244,13 @@ impl<R: Runtime> Ssu2Socket<R> {
             pending_outbound: HashMap::new(),
             pending_pkts: VecDeque::new(),
             pending_sessions: R::join_set(),
-            pkt_rx,
-            pkt_tx,
+            read_buffer: vec![0u8; DATAGRAM_MAX_SIZE],
             router_ctx,
             sessions: HashMap::new(),
-            socket_handle,
+            socket,
             static_key,
-            subsystem_handle,
             terminating_session: R::join_set(),
+            transport_tx,
             unvalidated_sessions: HashMap::new(),
             waker: None,
             write_state: WriteState::GetPacket,
@@ -325,17 +313,18 @@ impl<R: Runtime> Ssu2Socket<R> {
                     dst_id: connection_id,
                     intro_key: self.intro_key,
                     net_id: self.router_ctx.net_id(),
-                    pkt_num,
                     pkt: datagram,
-                    pkt_tx: self.pkt_tx.clone(),
+                    pkt_num,
                     rx,
+                    socket: self.socket.clone(),
                     src_id,
                     state: self.inbound_state.clone(),
                     static_key: self.static_key.clone(),
                 })?;
 
                 self.sessions.insert(connection_id, tx);
-                self.pending_sessions.push(session);
+                self.pending_sessions.push(session.run());
+                self.router_ctx.metrics_handle().counter(NUM_INBOUND_SSU2).increment(1);
 
                 Ok(())
             }
@@ -384,7 +373,7 @@ impl<R: Runtime> Ssu2Socket<R> {
 
         let router_info = self.router_ctx.router_info();
         let state = Sha256::new().update(&self.outbound_state).update(&static_key).finalize();
-        let subsystem_handle = self.subsystem_handle.clone();
+        let transport_tx = self.transport_tx.clone();
         let src_id = R::rng().next_u64();
         let dst_id = R::rng().next_u64();
 
@@ -400,6 +389,7 @@ impl<R: Runtime> Ssu2Socket<R> {
         let (tx, rx) = channel(CHANNEL_SIZE);
         self.sessions.insert(src_id, tx);
         self.pending_outbound.insert(address, intro_key);
+        self.router_ctx.metrics_handle().counter(NUM_OUTBOUND_SSU2).increment(1);
 
         self.pending_sessions.push(
             OutboundSsu2Session::<R>::new(OutboundSsu2Context {
@@ -409,15 +399,15 @@ impl<R: Runtime> Ssu2Socket<R> {
                 local_intro_key: self.intro_key,
                 local_static_key: self.static_key.clone(),
                 net_id: self.router_ctx.net_id(),
-                pkt_tx: self.pkt_tx.clone(),
                 remote_intro_key: intro_key,
                 router_id,
                 router_info,
                 rx,
+                socket: self.socket.clone(),
                 src_id,
                 state,
                 static_key,
-                subsystem_handle,
+                transport_tx,
             })
             .run(),
         );
@@ -479,8 +469,8 @@ impl<R: Runtime> Ssu2Socket<R> {
         self.active_sessions.push(
             Ssu2Session::<R>::new(
                 context,
-                self.pkt_tx.clone(),
-                self.subsystem_handle.clone(),
+                self.socket.clone(),
+                self.transport_tx.clone(),
                 self.router_ctx.metrics_handle().clone(),
             )
             .run(),
@@ -506,16 +496,42 @@ impl<R: Runtime> Ssu2Socket<R> {
 
         match kind {
             PendingSessionKind::Inbound {
-                context, dst_id, ..
+                context,
+                k_header_2,
+                ..
             } => {
                 tracing::debug!(
                     target: LOG_TARGET,
                     %router_id,
                     connection_id = ?context.dst_id,
-                    "inbound session rejected",
+                    "inbound session rejected, send termination",
                 );
 
-                self.sessions.remove(&dst_id);
+                let Ssu2SessionContext {
+                    address,
+                    dst_id,
+                    intro_key,
+                    pkt_rx,
+                    recv_key_ctx,
+                    router_id,
+                    send_key_ctx,
+                } = context;
+
+                self.terminating_session.push(TerminatingSsu2Session::<R>::new(
+                    TerminationContext {
+                        address,
+                        dst_id,
+                        intro_key,
+                        k_session_confirmed: Some(k_header_2),
+                        next_pkt_num: 0,
+                        reason: TerminationReason::ConnectionLimits,
+                        recv_key_ctx,
+                        router_id,
+                        rx: pkt_rx,
+                        send_key_ctx,
+                        socket: self.socket.clone(),
+                    },
+                ))
             }
             PendingSessionKind::Outbound {
                 address,
@@ -526,7 +542,7 @@ impl<R: Runtime> Ssu2Socket<R> {
                     target: LOG_TARGET,
                     %router_id,
                     connection_id = ?context.dst_id,
-                    "outbound session rejected",
+                    "outbound session rejected, send termination",
                 );
 
                 self.pending_outbound.remove(&address);
@@ -545,7 +561,7 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
         let this = &mut *self;
 
         loop {
-            match this.socket_handle.poll_next_unpin(cx) {
+            match Pin::new(&mut this.socket).poll_recv_from(cx, &mut this.read_buffer) {
                 Poll::Pending => break,
                 Poll::Ready(None) => {
                     tracing::warn!(
@@ -554,18 +570,15 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                     );
                     return Poll::Ready(None);
                 }
-                Poll::Ready(Some((datagram, from))) => {
-                    this.router_ctx
-                        .metrics_handle()
-                        .counter(INBOUND_BANDWIDTH)
-                        .increment(datagram.len());
+                Poll::Ready(Some((nread, from))) => {
+                    this.router_ctx.metrics_handle().counter(INBOUND_BANDWIDTH).increment(nread);
                     this.router_ctx.metrics_handle().counter(INBOUND_PKT_COUNT).increment(1);
                     this.router_ctx
                         .metrics_handle()
                         .histogram(INBOUND_PKT_SIZES)
-                        .record(datagram.len() as f64);
+                        .record(nread as f64);
 
-                    match this.handle_packet(datagram, from) {
+                    match this.handle_packet(this.read_buffer[..nread].to_vec(), from) {
                         Err(Ssu2Error::Channel(ChannelError::Full)) => {
                             tracing::debug!(
                                 target: LOG_TARGET,
@@ -573,7 +586,7 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                             );
                             this.router_ctx
                                 .metrics_handle()
-                                .counter(NUM_DROPS_CHANNEL_FULL)
+                                .counter(NUM_DROPPED_DATAGRAMS)
                                 .increment(1);
                         }
                         Err(error) => tracing::debug!(
@@ -588,22 +601,25 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
             }
         }
 
-        loop {
-            match this.active_sessions.poll_next_unpin(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(termination_ctx)) => {
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        router_id = %termination_ctx.router_id,
-                        connection_id = %termination_ctx.dst_id,
-                        "terminate active ssu2 session",
-                    );
+        match this.active_sessions.poll_next_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some(termination_ctx)) => {
+                let router_id = termination_ctx.router_id.clone();
+                let reason = termination_ctx.reason;
 
-                    this.terminating_session
-                        .push(TerminatingSsu2Session::<R>::new(termination_ctx));
-                    this.router_ctx.metrics_handle().gauge(NUM_CONNECTIONS).decrement(1);
-                }
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    connection_id = %termination_ctx.dst_id,
+                    ?reason,
+                    "terminate active ssu2 session",
+                );
+
+                this.terminating_session.push(TerminatingSsu2Session::<R>::new(termination_ctx));
+                this.router_ctx.metrics_handle().gauge(NUM_CONNECTIONS).decrement(1);
+
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason }));
             }
         }
 
@@ -654,8 +670,9 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                             context,
                             dst_id,
                             pkt,
-                            started: _,
                             target,
+                            k_header_2,
+                            ..
                         } => {
                             let router_id = context.router_id.clone();
 
@@ -675,6 +692,7 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                                             address: target,
                                             context,
                                             dst_id,
+                                            k_header_2,
                                         },
                                     );
 
@@ -731,12 +749,13 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                             }));
                         }
                         PendingSsu2SessionStatus::SessionTerminated {
+                            address,
                             connection_id,
                             router_id,
-                            started: _,
+                            ..
                         } => match router_id {
                             None => {
-                                tracing::warn!(
+                                tracing::debug!(
                                     target: LOG_TARGET,
                                     ?connection_id,
                                     "pending inbound session terminated",
@@ -744,13 +763,31 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                                 debug_assert!(false);
                             }
                             Some(router_id) => {
-                                tracing::warn!(
+                                tracing::debug!(
                                     target: LOG_TARGET,
                                     %router_id,
                                     ?connection_id,
                                     "pending outbound session terminated",
                                 );
-                                debug_assert!(false);
+                                let _channel = this.sessions.remove(&connection_id);
+                                debug_assert!(_channel.is_some());
+
+                                match address {
+                                    Some(address) => {
+                                        let _key = this.pending_outbound.remove(&address);
+                                        debug_assert!(_key.is_some());
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            target: LOG_TARGET,
+                                            %router_id,
+                                            %connection_id,
+                                            "address doens't exist for a terminated outbound connection",
+                                        );
+                                        debug_assert!(false);
+                                    }
+                                }
+
                                 return Poll::Ready(Some(TransportEvent::ConnectionFailure {
                                     router_id,
                                 }));
@@ -787,16 +824,6 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
         }
 
         loop {
-            match this.pkt_rx.poll_recv(cx) {
-                Poll::Pending => break,
-                Poll::Ready(None) => return Poll::Ready(None),
-                // TODO: useless conversion from vec to bytesmut
-                Poll::Ready(Some(Packet { pkt, address })) =>
-                    this.pending_pkts.push_back((BytesMut::from(&pkt[..]), address)),
-            }
-        }
-
-        loop {
             match mem::replace(&mut this.write_state, WriteState::Poisoned) {
                 WriteState::GetPacket => match this.pending_pkts.pop_front() {
                     None => {
@@ -807,31 +834,160 @@ impl<R: Runtime> Stream for Ssu2Socket<R> {
                         this.write_state = WriteState::SendPacket { pkt, target };
                     }
                 },
-                WriteState::SendPacket { pkt, target } => {
-                    let nwritten = pkt.len();
+                WriteState::SendPacket { pkt, target } => match Pin::new(&mut this.socket)
+                    .poll_send_to(cx, &pkt, target)
+                {
+                    Poll::Ready(Some(nwritten)) => {
+                        this.router_ctx
+                            .metrics_handle()
+                            .counter(OUTBOUND_BANDWIDTH)
+                            .increment(nwritten);
+                        this.router_ctx.metrics_handle().counter(OUTBOUND_PKT_COUNT).increment(1);
 
-                    match this.socket_handle.try_send_to(pkt.to_vec(), target) {
-                        Ok(()) => {
-                            this.router_ctx
-                                .metrics_handle()
-                                .counter(OUTBOUND_BANDWIDTH)
-                                .increment(nwritten);
-                            this.router_ctx
-                                .metrics_handle()
-                                .counter(OUTBOUND_PKT_COUNT)
-                                .increment(1);
-
-                            this.write_state = WriteState::GetPacket;
-                        }
-                        Err(ChannelError::Closed) => return Poll::Ready(None),
-                        Err(ChannelError::DoesntExist | ChannelError::Full) => {}
+                        this.write_state = WriteState::GetPacket;
                     }
-                }
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Pending => {
+                        this.write_state = WriteState::SendPacket { pkt, target };
+                        break;
+                    }
+                },
                 WriteState::Poisoned => unreachable!(),
             }
         }
 
         self.waker = Some(cx.waker().clone());
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        events::EventManager,
+        i2np::{Message, MessageType, I2NP_MESSAGE_EXPIRATION},
+        primitives::RouterInfoBuilder,
+        profile::ProfileStorage,
+        runtime::{mock::MockRuntime, UdpSocket},
+        subsystem::OutboundMessage,
+        transport::ssu2::session::KeyContext,
+    };
+
+    #[tokio::test]
+    async fn session_terminated() {
+        let storage = ProfileStorage::<MockRuntime>::new(&Vec::new(), &Vec::new());
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
+        let router_ctx = RouterContext::new(
+            MockRuntime::register_metrics(vec![], None),
+            storage,
+            router_info.identity.id(),
+            Bytes::from(router_info.serialize(&signing_key)),
+            static_key.clone(),
+            signing_key,
+            2u8,
+            event_handle.clone(),
+        );
+        let (transport_tx, transport_rx) = channel(128);
+        let mut socket = Ssu2Socket::<MockRuntime>::new(
+            <MockRuntime as Runtime>::UdpSocket::bind("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap(),
+            static_key,
+            [0xaa; 32],
+            transport_tx,
+            router_ctx,
+        );
+        let udp_socket = <MockRuntime as Runtime>::UdpSocket::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let mut recv_socket =
+            <MockRuntime as Runtime>::UdpSocket::bind("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+
+        let (_pkt_tx, pkt_rx) = channel(128);
+        let context = Ssu2SessionContext {
+            address: recv_socket.local_address().unwrap(),
+            dst_id: 1337u64,
+            intro_key: [0xbb; 32],
+            pkt_rx,
+            recv_key_ctx: KeyContext {
+                k_data: [0xcc; 32],
+                k_header_2: [0xdd; 32],
+            },
+            router_id: RouterId::random(),
+            send_key_ctx: KeyContext {
+                k_data: [0xee; 32],
+                k_header_2: [0xff; 32],
+            },
+        };
+        socket.active_sessions.push(
+            Ssu2Session::<MockRuntime>::new(
+                context,
+                udp_socket,
+                socket.transport_tx.clone(),
+                socket.router_ctx.metrics_handle().clone(),
+            )
+            .run(),
+        );
+
+        let tx = tokio::select! {
+            event = socket.next() => {
+                panic!("did not expect event {event:?}")
+            }
+            event = transport_rx.recv() => match event.unwrap() {
+                SubsystemEvent::ConnectionEstablished { tx, .. } => tx,
+                event => panic!("unexpected event: {event:?}"),
+            }
+        };
+
+        // send outbound message to the active session
+        tx.send(OutboundMessage::Message(Message {
+            message_type: MessageType::DatabaseStore,
+            message_id: 1337,
+            expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+            payload: vec![0; 512],
+        }))
+        .await
+        .unwrap();
+
+        // verify the message is received by `Ssu2Socket`
+        let mut buffer = vec![0u8; 0xffff];
+        let _ = tokio::time::timeout(Duration::from_secs(5), recv_socket.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut subsys_notified = false;
+        let mut transport_manager_notified = false;
+
+        let future = async {
+            while !subsys_notified || !transport_manager_notified {
+                tokio::select! {
+                    event = transport_rx.recv() => match event.unwrap() {
+                        SubsystemEvent::ConnectionClosed { .. } => {
+                            subsys_notified = true;
+                        }
+                        _ => {}
+                    },
+                    event = socket.next() => match event.unwrap() {
+                        TransportEvent::ConnectionClosed { .. } => {
+                            transport_manager_notified = true
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        };
+
+        match tokio::time::timeout(Duration::from_secs(15), future).await {
+            Err(_) => panic!("subsystem manager or transport manager was not notified in time"),
+            Ok(_) => {}
+        }
     }
 }

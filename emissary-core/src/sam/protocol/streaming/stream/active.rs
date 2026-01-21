@@ -1307,7 +1307,7 @@ impl<R: Runtime> Future for Stream<R> {
                             break;
                         }
 
-                        tracing::info!(
+                        tracing::trace!(
                             target: LOG_TARGET,
                             local = %this.local,
                             remote = %this.remote,

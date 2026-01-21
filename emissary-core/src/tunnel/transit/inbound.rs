@@ -22,13 +22,17 @@ use crate::{
     events::EventHandle,
     i2np::{
         tunnel::{data::TunnelDataBuilder, gateway::TunnelGateway},
-        Message, MessageBuilder, MessageType,
+        Message, MessageType,
     },
     primitives::{RouterId, TunnelId},
-    runtime::Runtime,
+    runtime::{Counter, Gauge, MetricsHandle, Runtime},
+    subsystem::SubsystemHandle,
     tunnel::{
+        metrics::{
+            NUM_DROPPED_MESSAGES, NUM_IBGWS, NUM_ROUTED_MESSAGES, NUM_TRANSIT_TUNNELS,
+            TOTAL_TRANSIT_TUNNELS,
+        },
         noise::TunnelKeys,
-        routing_table::RoutingTable,
         transit::{TransitTunnel, TRANSIT_TUNNEL_EXPIRATION},
     },
 };
@@ -66,14 +70,10 @@ pub struct InboundGateway<R: Runtime> {
     /// Used inbound bandwidth.
     inbound_bandwidth: usize,
 
-    /// Used outbound bandwidth.
-    outbound_bandwidth: usize,
-
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
 
     /// Metrics handle.
-    #[allow(unused)]
     metrics_handle: R::MetricsHandle,
 
     /// Next router ID.
@@ -82,11 +82,14 @@ pub struct InboundGateway<R: Runtime> {
     /// Next tunnel ID.
     next_tunnel_id: TunnelId,
 
+    /// Used outbound bandwidth.
+    outbound_bandwidth: usize,
+
     /// Random bytes used for tunnel data padding.
     padding_bytes: [u8; 1028],
 
-    /// Routing table.
-    routing_table: RoutingTable,
+    /// Subsystem handle.
+    subsystem_handle: SubsystemHandle,
 
     /// Tunnel ID.
     tunnel_id: TunnelId,
@@ -99,7 +102,7 @@ impl<R: Runtime> InboundGateway<R> {
     fn handle_tunnel_gateway(
         &self,
         tunnel_gateway: &TunnelGateway,
-    ) -> crate::Result<(RouterId, impl Iterator<Item = Vec<u8>> + '_)> {
+    ) -> crate::Result<(RouterId, impl Iterator<Item = Message> + '_)> {
         match Message::parse_standard(tunnel_gateway.payload) {
             Err(error) => {
                 tracing::warn!(
@@ -145,12 +148,12 @@ impl<R: Runtime> InboundGateway<R> {
                 message[AES_IV_OFFSET].copy_from_slice(&iv);
                 message[PAYLOAD_OFFSET].copy_from_slice(&ciphertext);
 
-                MessageBuilder::short()
-                    .with_message_type(MessageType::TunnelData)
-                    .with_message_id(R::rng().next_u32())
-                    .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
-                    .with_payload(&message)
-                    .build()
+                Message {
+                    message_type: MessageType::TunnelData,
+                    message_id: R::rng().next_u32(),
+                    expiration: R::time_since_epoch() + Duration::from_secs(8),
+                    payload: message,
+                }
             });
 
         Ok((self.next_router.clone(), messages))
@@ -163,7 +166,7 @@ impl<R: Runtime> TransitTunnel<R> for InboundGateway<R> {
         next_tunnel_id: TunnelId,
         next_router: RouterId,
         tunnel_keys: TunnelKeys,
-        routing_table: RoutingTable,
+        subsystem_handle: SubsystemHandle,
         metrics_handle: R::MetricsHandle,
         message_rx: Receiver<Message>,
         event_handle: EventHandle<R>,
@@ -183,6 +186,9 @@ impl<R: Runtime> TransitTunnel<R> for InboundGateway<R> {
 
             padding_bytes
         };
+        metrics_handle.gauge(NUM_IBGWS).increment(1);
+        metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
+        metrics_handle.counter(TOTAL_TRANSIT_TUNNELS).increment(1);
 
         InboundGateway {
             event_handle,
@@ -194,7 +200,7 @@ impl<R: Runtime> TransitTunnel<R> for InboundGateway<R> {
             next_router,
             next_tunnel_id,
             padding_bytes,
-            routing_table,
+            subsystem_handle,
             tunnel_id,
             tunnel_keys,
         }
@@ -213,6 +219,7 @@ impl<R: Runtime> Future for InboundGateway<R> {
                         tunnel_id = %self.tunnel_id,
                         "message channel closed",
                     );
+                    self.metrics_handle.gauge(NUM_IBGWS).decrement(1);
                     return Poll::Ready(self.tunnel_id);
                 }
                 Some(message) => {
@@ -226,6 +233,7 @@ impl<R: Runtime> Future for InboundGateway<R> {
                             "unsupported message",
                         );
                         debug_assert!(false);
+                        self.metrics_handle.counter(NUM_DROPPED_MESSAGES).increment(1);
                         continue;
                     };
 
@@ -236,12 +244,16 @@ impl<R: Runtime> Future for InboundGateway<R> {
                             "malformed tunnel gateway message",
                         );
                         debug_assert!(false);
+                        self.metrics_handle.counter(NUM_DROPPED_MESSAGES).increment(1);
                         continue;
                     };
 
                     let (router, messages) = match self.handle_tunnel_gateway(&message) {
                         Ok((router, messages)) => (router, messages),
-                        Err(Error::Expired) => continue,
+                        Err(Error::Expired) => {
+                            self.metrics_handle.counter(NUM_DROPPED_MESSAGES).increment(1);
+                            continue;
+                        }
                         Err(error) => {
                             tracing::warn!(
                                 target: LOG_TARGET,
@@ -249,23 +261,28 @@ impl<R: Runtime> Future for InboundGateway<R> {
                                 ?error,
                                 "failed to handle tunnel gateway",
                             );
+                            self.metrics_handle.counter(NUM_DROPPED_MESSAGES).increment(1);
                             continue;
                         }
                     };
 
                     self.outbound_bandwidth +=
                         messages.into_iter().fold(0usize, |mut acc, message| {
-                            acc += message.len();
+                            acc += message.serialized_len_short();
 
-                            if let Err(error) =
-                                self.routing_table.send_message(router.clone(), message)
-                            {
-                                tracing::error!(
-                                    target: LOG_TARGET,
-                                    tunnel_id = %self.tunnel_id,
-                                    ?error,
-                                    "failed to send message",
-                                )
+                            match self.subsystem_handle.send(&router, message) {
+                                Ok(()) => {
+                                    self.metrics_handle.counter(NUM_ROUTED_MESSAGES).increment(1);
+                                }
+                                Err(error) => {
+                                    tracing::error!(
+                                        target: LOG_TARGET,
+                                        tunnel_id = %self.tunnel_id,
+                                        ?error,
+                                        "failed to send message",
+                                    );
+                                    self.metrics_handle.counter(NUM_DROPPED_MESSAGES).increment(1);
+                                }
                             }
 
                             acc
@@ -282,6 +299,9 @@ impl<R: Runtime> Future for InboundGateway<R> {
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {
+            self.metrics_handle.gauge(NUM_IBGWS).decrement(1);
+            self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).decrement(1);
+
             return Poll::Ready(self.tunnel_id);
         }
 
@@ -295,9 +315,10 @@ mod tests {
     use crate::{
         crypto::EphemeralPublicKey,
         events::EventManager,
-        i2np::HopRole,
+        i2np::{HopRole, MessageBuilder},
         primitives::{MessageId, Str},
         runtime::mock::MockRuntime,
+        subsystem::SubsystemHandle,
         tunnel::{
             garlic::{DeliveryInstructions, GarlicHandler},
             hop::{
@@ -305,12 +326,11 @@ mod tests {
                 TunnelBuildParameters, TunnelInfo,
             },
             pool::TunnelPoolBuildParameters,
-            routing_table::RoutingKindRecycle,
             tests::make_router,
         },
     };
     use bytes::Bytes;
-    use thingbuf::mpsc::{channel, with_recycle};
+    use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn expired_tunnel_gateway_payload() {
@@ -320,14 +340,12 @@ mod tests {
             ibgw_noise.clone(),
             MockRuntime::register_metrics(vec![], None),
         );
-        let (_ibep_router_hash, _ibep_public_key, _, ibep_noise, ibep_router_info) =
+        let (_ibep_router_hash, _ibep_public_key, _, ibep_noise, _ibep_router_info) =
             make_router(false);
 
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
-        let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
-        let routing_table =
-            RoutingTable::new(ibep_router_info.identity.id(), manager_tx, transit_tx);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
+        let (subsys_handle, _event_rx) = SubsystemHandle::new();
 
         let (_tx, rx) = channel(64);
         let TunnelPoolBuildParameters {
@@ -336,22 +354,21 @@ mod tests {
         } = TunnelPoolBuildParameters::new(Default::default());
 
         let (pending, router_id, message) =
-            PendingTunnel::<InboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: vec![(ibgw_router_hash.clone(), ibgw_static_key.public())],
-                    name: Str::from("tunnel-pool"),
-                    noise: ibep_noise.clone(),
-                    message_id: MessageId::from(MockRuntime::rng().next_u32()),
-                    tunnel_info: TunnelInfo::Inbound {
-                        tunnel_id: TunnelId::random(),
-                        router_id: Bytes::from(RouterId::random().to_vec()),
-                    },
-                    receiver: ReceiverKind::Inbound {
-                        message_rx: rx,
-                        handle,
-                    },
+            PendingTunnel::<_, InboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: vec![(ibgw_router_hash.clone(), ibgw_static_key.public())],
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: ibep_noise.clone(),
+                message_id: MessageId::from(MockRuntime::rng().next_u32()),
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id: TunnelId::random(),
+                    router_id: Bytes::from(RouterId::random().to_vec()),
                 },
-            )
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
+            })
             .unwrap();
 
         assert_eq!(router_id, ibgw_router_info.identity.id());
@@ -408,7 +425,7 @@ mod tests {
             TunnelId::random(),
             RouterId::random(),
             ibgw_keys,
-            routing_table,
+            subsys_handle,
             MockRuntime::register_metrics(vec![], None),
             msg_rx,
             event_handle.clone(),
@@ -434,20 +451,18 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_tunnel_gateway_payload() {
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (ibgw_router_hash, ibgw_static_key, _, ibgw_noise, ibgw_router_info) =
             make_router(false);
         let mut ibgw_garlic = GarlicHandler::<MockRuntime>::new(
             ibgw_noise.clone(),
             MockRuntime::register_metrics(vec![], None),
         );
-        let (_ibep_router_hash, _ibep_public_key, _, ibep_noise, ibep_router_info) =
+        let (_ibep_router_hash, _ibep_public_key, _, ibep_noise, _ibep_router_info) =
             make_router(false);
 
-        let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
-        let routing_table =
-            RoutingTable::new(ibep_router_info.identity.id(), manager_tx, transit_tx);
+        let (subsys_handle, _event_rx) = SubsystemHandle::new();
 
         let (_tx, rx) = channel(64);
         let TunnelPoolBuildParameters {
@@ -456,22 +471,21 @@ mod tests {
         } = TunnelPoolBuildParameters::new(Default::default());
 
         let (pending, router_id, message) =
-            PendingTunnel::<InboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: vec![(ibgw_router_hash.clone(), ibgw_static_key.public())],
-                    name: Str::from("tunnel-pool"),
-                    noise: ibep_noise.clone(),
-                    message_id: MessageId::from(MockRuntime::rng().next_u32()),
-                    tunnel_info: TunnelInfo::Inbound {
-                        tunnel_id: TunnelId::random(),
-                        router_id: Bytes::from(RouterId::random().to_vec()),
-                    },
-                    receiver: ReceiverKind::Inbound {
-                        message_rx: rx,
-                        handle,
-                    },
+            PendingTunnel::<_, InboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: vec![(ibgw_router_hash.clone(), ibgw_static_key.public())],
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: ibep_noise.clone(),
+                message_id: MessageId::from(MockRuntime::rng().next_u32()),
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id: TunnelId::random(),
+                    router_id: Bytes::from(RouterId::random().to_vec()),
                 },
-            )
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
+            })
             .unwrap();
 
         assert_eq!(router_id, ibgw_router_info.identity.id());
@@ -528,7 +542,7 @@ mod tests {
             TunnelId::random(),
             RouterId::random(),
             ibgw_keys,
-            routing_table,
+            subsys_handle,
             MockRuntime::register_metrics(vec![], None),
             msg_rx,
             event_handle.clone(),

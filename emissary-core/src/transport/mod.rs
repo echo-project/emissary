@@ -17,28 +17,25 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    error::{ChannelError, QueryError},
+    error::QueryError,
     events::EventHandle,
     netdb::NetDbHandle,
     primitives::{Date, RouterAddress, RouterId, RouterInfo, Str, TransportKind},
     router::context::RouterContext,
     runtime::{Counter, Gauge, JoinSet, MetricType, MetricsHandle, Runtime},
-    subsystem::{
-        InnerSubsystemEvent, SubsystemCommand, SubsystemEvent, SubsystemHandle, SubsystemKind,
-    },
+    subsystem::SubsystemEvent,
     transport::{metrics::*, ntcp2::Ntcp2Context, ssu2::Ssu2Context},
     Ntcp2Config, Ssu2Config,
 };
 
 use bytes::Bytes;
 use futures::{FutureExt, Stream, StreamExt};
-use hashbrown::{HashMap, HashSet};
-use thingbuf::mpsc::{channel, errors::TrySendError, Receiver, Sender};
+use hashbrown::HashSet;
+use thingbuf::mpsc::{Receiver, Sender};
 
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
-    marker::PhantomData,
     net::Ipv4Addr,
     pin::Pin,
     task::{Context, Poll},
@@ -192,6 +189,35 @@ impl TerminationReason {
             _ => TerminationReason::Unspecified,
         }
     }
+
+    /// Convert SSU2 termination reason into `u8`.
+    pub fn from_ssu2(self) -> u8 {
+        match self {
+            TerminationReason::Unspecified => 0,
+            TerminationReason::TerminationReceived => 1,
+            TerminationReason::IdleTimeout => 2,
+            TerminationReason::RouterShutdown => 3,
+            TerminationReason::AeadFailure => 4,
+            TerminationReason::IncompatibleOptions => 5,
+            TerminationReason::IncompatibleSignatureKind => 6,
+            TerminationReason::ClockSkew => 7,
+            TerminationReason::PaddinViolation => 8,
+            TerminationReason::AeadFramingError => 9,
+            TerminationReason::PayloadFormatError => 10,
+            TerminationReason::Ssu2HandshakeError(1) => 11,
+            TerminationReason::Ssu2HandshakeError(2) => 12,
+            TerminationReason::Ssu2HandshakeError(3) => 13,
+            TerminationReason::IntraFrameReadTimeout => 14,
+            TerminationReason::InvalidRouterInfo => 15,
+            TerminationReason::Banned => 17,
+            TerminationReason::BadToken => 18,
+            TerminationReason::ConnectionLimits => 19,
+            TerminationReason::IncompatibleVersion => 20,
+            TerminationReason::WrongNetId => 21,
+            TerminationReason::ReplacedByNewSession => 22,
+            _ => 255,
+        }
+    }
 }
 
 /// Direction of the connection.
@@ -247,166 +273,13 @@ pub trait Transport: Stream + Unpin + Send {
     fn reject(&mut self, router: &RouterId);
 }
 
-#[derive(Default, Debug, Clone)]
-pub enum ProtocolCommand {
-    /// Attempt to connect to remote peer.
-    Connect {
-        /// ID of the remote router.
-        router_id: RouterId,
-    },
-
-    /// Dummy event.
-    #[default]
-    Dummy,
-}
-
-/// Transport service.
-///
-/// Implements a handle that is given to subsystems of `emissary` are themselves not transports
-/// but interact with them, namely `NetDb` and `TunnelManager`. [`TransportService`] allows
-/// the subsystem to establish new connections, close existing connections, send and receive
-/// messages to and from the network.
-pub struct TransportService<R: Runtime> {
-    /// TX channel for sending commands to [`TransportManager`].
-    cmd_tx: Sender<ProtocolCommand>,
-
-    /// RX channel for receiving events from enabled transports.
-    event_rx: Receiver<InnerSubsystemEvent>,
-
-    /// Pending events.
-    pending_events: VecDeque<InnerSubsystemEvent>,
-
-    /// Connected routers.
-    routers: HashMap<RouterId, Sender<SubsystemCommand>>,
-
-    /// Marker for `Runtime`.
-    _runtime: PhantomData<R>,
-}
-
-impl<R: Runtime> TransportService<R> {
-    /// Attempt to establish connection to `router`.
-    ///
-    /// The connection is established in the background and the result
-    /// can be received by polling [`TransportService`].
-    ///
-    /// [`TransportService::connect()`] returns an error if the channel is clogged
-    /// and the caller should try again later.
-    ///
-    /// If `router` is not reachable or the handshake fails, the error is reported
-    /// via [`TransportService::poll_next()`].
-    pub fn connect(&mut self, router_id: &RouterId) -> Result<(), ()> {
-        if self.routers.contains_key(router_id) {
-            tracing::debug!(
-                target: LOG_TARGET,
-                %router_id,
-                "tried to dial an already-connected router",
-            );
-
-            self.pending_events.push_back(InnerSubsystemEvent::ConnectionFailure {
-                router: router_id.clone(),
-            });
-            return Ok(());
-        }
-
-        self.cmd_tx
-            .try_send(ProtocolCommand::Connect {
-                router_id: router_id.clone(),
-            })
-            .map_err(|_| ())
-    }
-
-    /// Send I2NP `message` to `router`.
-    ///
-    /// If the router doesn't exist, `ChannelError::DoesntExist` is returned.
-    /// If the channel is closed, `ChannelError::Closed` is returned.
-    /// If the channel is full, `ChannelError::Full` is returned.
-    ///
-    /// In all error cases, `message` is returned together with error
-    pub fn send(
-        &mut self,
-        router: &RouterId,
-        message: Vec<u8>,
-    ) -> Result<(), (ChannelError, Vec<u8>)> {
-        let Some(channel) = self.routers.get(router) else {
-            return Err((ChannelError::DoesntExist, message));
-        };
-
-        channel.try_send(SubsystemCommand::SendMessage { message }).map_err(|error| {
-            let (error, message) = match error {
-                TrySendError::Full(message) => (ChannelError::Full, message),
-                TrySendError::Closed(message) => (ChannelError::Closed, message),
-                _ => unimplemented!(),
-            };
-
-            let inner = match message {
-                SubsystemCommand::SendMessage { message } => message,
-                _ => unreachable!(),
-            };
-
-            (error, inner)
-        })
-    }
-
-    /// Create new [`TransportService`] for testing.
-    #[cfg(test)]
-    pub fn new() -> (
-        Self,
-        Receiver<ProtocolCommand>,
-        Sender<InnerSubsystemEvent>,
-        crate::profile::ProfileStorage<R>,
-    ) {
-        let (event_tx, event_rx) = channel(64);
-        let (cmd_tx, cmd_rx) = channel(64);
-        let profile_storage = crate::profile::ProfileStorage::new(&Vec::new(), &Vec::new());
-
-        (
-            TransportService {
-                cmd_tx,
-                event_rx,
-                pending_events: VecDeque::new(),
-                routers: HashMap::new(),
-                _runtime: Default::default(),
-            },
-            cmd_rx,
-            event_tx,
-            profile_storage,
-        )
-    }
-}
-
-impl<R: Runtime> Stream for TransportService<R> {
-    type Item = SubsystemEvent;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match futures::ready!(self.event_rx.poll_recv(cx)) {
-            None => Poll::Ready(None),
-            Some(InnerSubsystemEvent::ConnectionEstablished { router, tx }) => {
-                self.routers.insert(router.clone(), tx);
-                Poll::Ready(Some(SubsystemEvent::ConnectionEstablished { router }))
-            }
-            Some(InnerSubsystemEvent::ConnectionClosed { router }) => {
-                self.routers.remove(&router);
-                Poll::Ready(Some(SubsystemEvent::ConnectionClosed { router }))
-            }
-            Some(InnerSubsystemEvent::ConnectionFailure { router }) =>
-                Poll::Ready(Some(SubsystemEvent::ConnectionFailure { router })),
-            Some(InnerSubsystemEvent::I2Np { messages }) =>
-                Poll::Ready(Some(SubsystemEvent::I2Np { messages })),
-            Some(InnerSubsystemEvent::Dummy) => unreachable!(),
-        }
-    }
-}
-
 /// Builder for [`TransportManager`].
 pub struct TransportManagerBuilder<R: Runtime> {
     /// Allow local addresses.
     allow_local: bool,
 
-    /// RX channel for receiving commands from other subsystems.
-    cmd_rx: Receiver<ProtocolCommand>,
-
-    /// TX channel passed onto other subsystems.
-    cmd_tx: Sender<ProtocolCommand>,
+    /// RX channel for receiving dial requests.
+    dial_rx: Receiver<RouterId>,
 
     /// Local router info.
     local_router_info: RouterInfo,
@@ -423,11 +296,12 @@ pub struct TransportManagerBuilder<R: Runtime> {
     /// SSU2 config.
     ssu2_config: Option<Ssu2Config>,
 
-    /// Subsystem handle passed onto enabled transports.
-    subsystem_handle: SubsystemHandle,
-
     /// Are transit tunnels disabled.
     transit_tunnels_disabled: bool,
+
+    /// TX channel given to connections which they use to send inbound
+    /// messages to `SubsystemManager` for processing.
+    transport_tx: Sender<SubsystemEvent>,
 
     /// Enabled transports.
     transports: Vec<Box<dyn Transport<Item = TransportEvent>>>,
@@ -439,42 +313,20 @@ impl<R: Runtime> TransportManagerBuilder<R> {
         router_ctx: RouterContext<R>,
         local_router_info: RouterInfo,
         allow_local: bool,
+        dial_rx: Receiver<RouterId>,
+        transport_tx: Sender<SubsystemEvent>,
     ) -> Self {
-        let (cmd_tx, cmd_rx) = channel(256);
-
         Self {
             allow_local,
-            cmd_rx,
-            cmd_tx,
+            dial_rx,
             local_router_info,
             netdb_handle: None,
             ntcp2_config: None,
             router_ctx,
             ssu2_config: None,
-            subsystem_handle: SubsystemHandle::new(),
             transit_tunnels_disabled: false,
             transports: Vec::with_capacity(2),
-        }
-    }
-
-    //// Register subsystem.
-    pub fn register_subsystem(&mut self, kind: SubsystemKind) -> TransportService<R> {
-        let (event_tx, event_rx) = channel(DEFAULT_CHANNEL_SIZE);
-
-        tracing::debug!(
-            target: LOG_TARGET,
-            subsystem = ?kind,
-            "register subsystem",
-        );
-
-        self.subsystem_handle.register_subsystem(event_tx);
-
-        TransportService {
-            cmd_tx: self.cmd_tx.clone(),
-            event_rx,
-            pending_events: VecDeque::new(),
-            routers: HashMap::new(),
-            _runtime: Default::default(),
+            transport_tx,
         }
     }
 
@@ -485,7 +337,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             context,
             self.allow_local,
             self.router_ctx.clone(),
-            self.subsystem_handle.clone(),
+            self.transport_tx.clone(),
         )))
     }
 
@@ -496,7 +348,7 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             context,
             self.allow_local,
             self.router_ctx.clone(),
-            self.subsystem_handle.clone(),
+            self.transport_tx.clone(),
         )))
     }
 
@@ -514,7 +366,8 @@ impl<R: Runtime> TransportManagerBuilder<R> {
     /// Build into [`TransportManager`].
     pub fn build(self) -> TransportManager<R> {
         TransportManager {
-            cmd_rx: self.cmd_rx,
+            dial_rx: self.dial_rx,
+            transport_tx: self.transport_tx.clone(),
             event_handle: self.router_ctx.event_handle().clone(),
             external_address: None,
             local_router_info: self.local_router_info,
@@ -531,7 +384,6 @@ impl<R: Runtime> TransportManagerBuilder<R> {
             routers: HashSet::new(),
             shutting_down: false,
             ssu2_config: self.ssu2_config,
-            subsystem_handle: self.subsystem_handle,
             transit_tunnels_disabled: self.transit_tunnels_disabled,
             transports: self.transports,
         }
@@ -544,8 +396,8 @@ impl<R: Runtime> TransportManagerBuilder<R> {
 /// together with enabled, lower-level transports and polling for polling those
 /// transports so that they can make progress.
 pub struct TransportManager<R: Runtime> {
-    /// RX channel for receiving commands from other subsystems.
-    cmd_rx: Receiver<ProtocolCommand>,
+    /// RX channel for receiving dial requests.
+    dial_rx: Receiver<RouterId>,
 
     /// Event handle.
     event_handle: EventHandle<R>,
@@ -589,11 +441,11 @@ pub struct TransportManager<R: Runtime> {
     /// SSU2 config.
     ssu2_config: Option<Ssu2Config>,
 
-    /// Subsystem handle.
-    subsystem_handle: SubsystemHandle,
-
     /// Are transit tunnels disabled.
     transit_tunnels_disabled: bool,
+
+    /// TX channel for sending transport-related events to `SubsystemManager`.
+    transport_tx: Sender<SubsystemEvent>,
 
     /// Enabled transports.
     transports: Vec<Box<dyn Transport<Item = TransportEvent>>>,
@@ -714,6 +566,19 @@ impl<R: Runtime> TransportManager<R> {
             return;
         }
 
+        // `SubsystemManager` might send an outbound connection request just before an inbound
+        // connection has been accepted by the `TransportManager`
+        //
+        // ignore these requests
+        if self.routers.contains(&router_id) {
+            tracing::debug!(
+                target: LOG_TARGET,
+                %router_id,
+                "router is already connected, ignoring dial request",
+            );
+            return;
+        }
+
         match self.router_ctx.profile_storage().get(&router_id) {
             Some(router_info) => {
                 // even though `TransportService` prevents dialing the same router from the same
@@ -742,12 +607,19 @@ impl<R: Runtime> TransportManager<R> {
                         caps = %router_info.capabilities,
                         "cannot dial router, ntcp2 address is not reachable",
                     );
+
                     self.pending_connections.remove(&router_id);
+                    self.router_ctx.metrics_handle().counter(NUM_DIAL_FAILURES).increment(1);
 
                     // report connection failure to subsystems
-                    let mut handle = self.subsystem_handle.clone();
+                    let transport_tx = self.transport_tx.clone();
+
                     R::spawn(async move {
-                        handle.report_connection_failure(router_id).await;
+                        // subsystem manager never dies
+                        transport_tx
+                            .send(SubsystemEvent::ConnectionFailure { router_id })
+                            .await
+                            .expect("channel to stay open");
                     });
 
                     return;
@@ -761,6 +633,7 @@ impl<R: Runtime> TransportManager<R> {
 
                 // TODO: compare transport costs
                 self.transports[0].connect(router_info);
+                self.router_ctx.metrics_handle().counter(NUM_INITIATED).increment(1);
             }
             None => {
                 tracing::debug!(
@@ -839,6 +712,8 @@ impl<R: Runtime> Future for TransportManager<R> {
                                 %router_id,
                                 "outbound connection pending, rejecting inbound connection",
                             );
+
+                            self.router_ctx.metrics_handle().counter(NUM_REJECTED).increment(1);
                             self.transports[index].reject(&router_id);
                         }
                         Direction::Outbound if !self.pending_connections.contains(&router_id) => {
@@ -847,6 +722,8 @@ impl<R: Runtime> Future for TransportManager<R> {
                                 %router_id,
                                 "pending connection doesn't exist for router, rejecting connection",
                             );
+
+                            self.router_ctx.metrics_handle().counter(NUM_REJECTED).increment(1);
                             self.transports[index].reject(&router_id);
                         }
                         direction => match self.routers.insert(router_id.clone()) {
@@ -864,6 +741,7 @@ impl<R: Runtime> Future for TransportManager<R> {
                                     .metrics_handle()
                                     .gauge(NUM_CONNECTIONS)
                                     .increment(1);
+                                self.router_ctx.metrics_handle().counter(NUM_ACCEPTED).increment(1);
                                 self.router_ctx.profile_storage().dial_succeeded(&router_id);
                             }
                             false => {
@@ -872,6 +750,8 @@ impl<R: Runtime> Future for TransportManager<R> {
                                     %router_id,
                                     "router already connected, rejecting",
                                 );
+
+                                self.router_ctx.metrics_handle().counter(NUM_REJECTED).increment(1);
                                 self.transports[index].reject(&router_id);
                             }
                         },
@@ -933,6 +813,11 @@ impl<R: Runtime> Future for TransportManager<R> {
 
                     self.pending_queries.remove(&router_id);
                     self.pending_connections.remove(&router_id);
+                    self.router_ctx
+                        .metrics_handle()
+                        .counter(NUM_NETDB_QUERY_SUCCESSES)
+                        .increment(1);
+
                     self.on_dial_router(router_id);
                 }
                 Poll::Ready(Some((router_id, Err(error)))) => {
@@ -944,28 +829,28 @@ impl<R: Runtime> Future for TransportManager<R> {
                     );
                     self.pending_connections.remove(&router_id);
                     self.pending_queries.remove(&router_id);
+                    self.router_ctx.metrics_handle().gauge(NUM_DIAL_FAILURES).increment(1);
+                    self.router_ctx.metrics_handle().counter(NUM_NETDB_QUERY_FAILURES).increment(1);
 
                     // report connection failure to subsystems
-                    let mut handle = self.subsystem_handle.clone();
+                    let transport_tx = self.transport_tx.clone();
 
                     R::spawn(async move {
-                        handle.report_connection_failure(router_id).await;
+                        // subsystem manager never dies
+                        transport_tx
+                            .send(SubsystemEvent::ConnectionFailure { router_id })
+                            .await
+                            .expect("channel to stay open");
                     });
                 }
             }
         }
 
         loop {
-            match self.cmd_rx.poll_recv(cx) {
+            match self.dial_rx.poll_recv(cx) {
                 Poll::Pending => break,
                 Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(ProtocolCommand::Connect { router_id })) =>
-                    self.on_dial_router(router_id),
-                Poll::Ready(Some(event)) => tracing::warn!(
-                    target: LOG_TARGET,
-                    ?event,
-                    "unhandled event",
-                ),
+                Poll::Ready(Some(router_id)) => self.on_dial_router(router_id),
             }
         }
 
@@ -1010,20 +895,29 @@ impl<R: Runtime> Future for TransportManager<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
     use crate::{
         events::EventManager,
+        i2np::{Message, MessageType, I2NP_MESSAGE_EXPIRATION},
         netdb::NetDbAction,
         primitives::{Capabilities, RouterInfoBuilder, Str},
         profile::ProfileStorage,
         runtime::mock::MockRuntime,
+        subsystem::OutboundMessage,
     };
+    use thingbuf::mpsc::channel;
     use tokio::sync::mpsc;
 
     fn make_transport_manager(
         ntcp2: Option<Ntcp2Config>,
         ssu2: Option<Ssu2Config>,
-    ) -> TransportManagerBuilder<MockRuntime> {
+    ) -> (
+        TransportManagerBuilder<MockRuntime>,
+        Sender<RouterId>,
+        Receiver<SubsystemEvent>,
+    ) {
         let (router_info, static_key, signing_key) = {
             let mut builder = RouterInfoBuilder::default();
 
@@ -1038,8 +932,11 @@ mod tests {
             builder.build()
         };
         let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let (dial_tx, dial_rx) = channel(100);
+        let (transport_tx, transport_rx) = channel(100);
         let (handle, _) = NetDbHandle::create();
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
@@ -1051,10 +948,16 @@ mod tests {
             event_handle.clone(),
         );
 
-        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
         builder.register_netdb_handle(handle);
 
-        builder
+        (builder, dial_tx, transport_rx)
     }
 
     #[tokio::test]
@@ -1070,7 +973,8 @@ mod tests {
         .unwrap()
         .0
         .unwrap();
-        let mut builder = make_transport_manager(Some(context.config()), None);
+        let (mut builder, _dial_tx, _transport_rx) =
+            make_transport_manager(Some(context.config()), None);
         builder.register_ntcp2(context);
         let mut manager = builder.build();
 
@@ -1132,7 +1036,8 @@ mod tests {
         .0
         .unwrap();
 
-        let mut builder = make_transport_manager(Some(context.config()), None);
+        let (mut builder, _dial_tx, _transport_rx) =
+            make_transport_manager(Some(context.config()), None);
         builder.register_ntcp2(context);
         let mut manager = builder.build();
 
@@ -1187,7 +1092,8 @@ mod tests {
         };
         let context =
             Ssu2Transport::<MockRuntime>::initialize(Some(ssu2)).await.unwrap().0.unwrap();
-        let mut builder = make_transport_manager(None, Some(context.config()));
+        let (mut builder, _dial_tx, _transport_rx) =
+            make_transport_manager(None, Some(context.config()));
         builder.register_ssu2(context);
         let mut manager = builder.build();
 
@@ -1233,7 +1139,8 @@ mod tests {
         .0
         .unwrap();
 
-        let mut builder = make_transport_manager(None, Some(context.config()));
+        let (mut builder, _dial_tx, _transport_rx) =
+            make_transport_manager(None, Some(context.config()));
         builder.register_ssu2(context);
         let mut manager = builder.build();
 
@@ -1286,7 +1193,7 @@ mod tests {
         .0
         .unwrap();
 
-        let mut builder =
+        let (mut builder, _dial_tx, _transport_rx) =
             make_transport_manager(Some(ntcp2_context.config()), Some(ssu2_context.config()));
         builder.register_ssu2(ssu2_context);
         builder.register_ntcp2(ntcp2_context);
@@ -1366,7 +1273,8 @@ mod tests {
         .unwrap()
         .0
         .unwrap();
-        let mut builder = make_transport_manager(Some(context.config()), None);
+        let (mut builder, _dial_tx, _transport_rx) =
+            make_transport_manager(Some(context.config()), None);
         builder.register_ntcp2(context);
         let mut manager = builder.build();
 
@@ -1428,7 +1336,8 @@ mod tests {
         .0
         .unwrap();
 
-        let mut builder = make_transport_manager(None, Some(context.config()));
+        let (mut builder, _dial_tx, _transport_rx) =
+            make_transport_manager(None, Some(context.config()));
         builder.register_ssu2(context);
         let mut manager = builder.build();
 
@@ -1465,7 +1374,8 @@ mod tests {
         let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let (handle, _) = NetDbHandle::create();
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
             ProfileStorage::<MockRuntime>::new(&[], &[]),
@@ -1477,9 +1387,16 @@ mod tests {
             event_handle.clone(),
         );
 
-        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        let (_dial_tx, dial_rx) = channel(100);
+        let (transport_tx, _transport_rx) = channel(100);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
         builder.register_netdb_handle(handle);
-        let _handle = builder.register_subsystem(SubsystemKind::NetDb);
         let mut manager = builder.build();
 
         #[derive(Clone, Default)]
@@ -1575,7 +1492,8 @@ mod tests {
         let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (handle, _) = NetDbHandle::create();
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
@@ -1592,9 +1510,16 @@ mod tests {
         let router_id = router.identity.id();
         storage.add_router(router);
 
-        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        let (dial_tx, dial_rx) = channel(100);
+        let (transport_tx, _transport_rx) = channel(100);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
         builder.register_netdb_handle(handle);
-        let mut handle = builder.register_subsystem(SubsystemKind::NetDb);
         let mut manager = builder.build();
 
         #[derive(Clone, Default)]
@@ -1642,7 +1567,7 @@ mod tests {
         manager.transports.push(Box::new(MockTransport { event_rx, tx }));
         tokio::spawn(manager);
 
-        handle.connect(&router_id).unwrap();
+        dial_tx.send(router_id.clone()).await.unwrap();
 
         match tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
@@ -1706,7 +1631,8 @@ mod tests {
         let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (handle, netdb_rx) = NetDbHandle::create();
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
@@ -1720,9 +1646,16 @@ mod tests {
         );
         let router_id = RouterId::random();
 
-        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        let (dial_tx, dial_rx) = channel(100);
+        let (transport_tx, _transport_rx) = channel(100);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
         builder.register_netdb_handle(handle);
-        let mut handle = builder.register_subsystem(SubsystemKind::NetDb);
         let mut manager = builder.build();
 
         #[derive(Clone, Default)]
@@ -1769,7 +1702,7 @@ mod tests {
         manager.transports.push(Box::new(MockTransport { event_rx, tx }));
         tokio::spawn(manager);
 
-        handle.connect(&router_id).unwrap();
+        dial_tx.send(router_id.clone()).await.unwrap();
 
         // since RI for `router_id` doesn't exist, it's looked up from netdb
         let query_result_tx = match tokio::time::timeout(Duration::from_secs(5), netdb_rx.recv())
@@ -1835,7 +1768,8 @@ mod tests {
         let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (handle, _netdb_rx) = NetDbHandle::create();
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
@@ -1859,8 +1793,15 @@ mod tests {
         .0
         .unwrap();
 
-        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
-        let _handle = builder.register_subsystem(SubsystemKind::NetDb);
+        let (_dial_tx, dial_rx) = channel(100);
+        let (transport_tx, _transport_rx) = channel(100);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
         builder.register_netdb_handle(handle);
         builder.register_ntcp2(context);
 
@@ -1892,7 +1833,8 @@ mod tests {
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
         let (handle, _netdb_rx) = NetDbHandle::create();
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
             storage.clone(),
@@ -1915,8 +1857,15 @@ mod tests {
         .0
         .unwrap();
 
-        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
-        let _handle = builder.register_subsystem(SubsystemKind::NetDb);
+        let (_dial_tx, dial_rx) = channel(100);
+        let (transport_tx, _transport_rx) = channel(100);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
         builder.register_netdb_handle(handle);
         builder.register_ntcp2(context);
         builder.with_transit_tunnels_disabled(true);
@@ -1939,7 +1888,8 @@ mod tests {
         let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
         let serialized = Bytes::from(router_info.serialize(&signing_key));
         let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (handle, netdb_rx) = NetDbHandle::create();
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
@@ -1953,9 +1903,16 @@ mod tests {
         );
         let router_id = RouterId::random();
 
-        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        let (dial_tx, dial_rx) = channel(100);
+        let (transport_tx, transport_rx) = channel(100);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
         builder.register_netdb_handle(handle);
-        let mut handle = builder.register_subsystem(SubsystemKind::NetDb);
         let mut manager = builder.build();
 
         #[derive(Clone, Default)]
@@ -2004,7 +1961,7 @@ mod tests {
         manager.transports.push(Box::new(MockTransport { event_rx, tx }));
         tokio::spawn(manager);
 
-        handle.connect(&router_id).unwrap();
+        dial_tx.send(router_id.clone()).await.unwrap();
 
         // since RI for `router_id` doesn't exist, it's looked up from netdb
         let query_result_tx = match tokio::time::timeout(Duration::from_secs(5), netdb_rx.recv())
@@ -2024,12 +1981,14 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        match tokio::time::timeout(Duration::from_secs(5), handle.next())
+        match tokio::time::timeout(Duration::from_secs(5), transport_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed")
         {
-            SubsystemEvent::ConnectionFailure { router } => assert_eq!(router, router_id),
+            SubsystemEvent::ConnectionFailure { router_id: router } => {
+                assert_eq!(router, router_id)
+            }
             _ => panic!("invalid event"),
         }
     }
@@ -2051,7 +2010,8 @@ mod tests {
         let remote_router_id = remote_router_info.identity.id();
         storage.add_router(remote_router_info);
 
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (handle, _netdb_rx) = NetDbHandle::create();
         let ctx = RouterContext::new(
             MockRuntime::register_metrics(vec![], None),
@@ -2064,9 +2024,16 @@ mod tests {
             event_handle.clone(),
         );
 
-        let mut builder = TransportManagerBuilder::<MockRuntime>::new(ctx, router_info, true);
+        let (dial_tx, dial_rx) = channel(100);
+        let (transport_tx, transport_rx) = channel(100);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
         builder.register_netdb_handle(handle);
-        let mut handle = builder.register_subsystem(SubsystemKind::NetDb);
         let context = Ntcp2Transport::<MockRuntime>::initialize(Some(Ntcp2Config {
             port: 0,
             host: Some("192.168.0.1".parse().unwrap()),
@@ -2117,14 +2084,16 @@ mod tests {
 
         // attempt to connect to remote router but since they don't have an ntcp2 address,
         // the dial fails
-        handle.connect(&remote_router_id).unwrap();
+        dial_tx.send(remote_router_id.clone()).await.unwrap();
 
-        match tokio::time::timeout(Duration::from_secs(5), handle.next())
+        match tokio::time::timeout(Duration::from_secs(5), transport_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed")
         {
-            SubsystemEvent::ConnectionFailure { router } => assert_eq!(router, remote_router_id),
+            SubsystemEvent::ConnectionFailure { router_id: router } => {
+                assert_eq!(router, remote_router_id)
+            }
             _ => panic!("invalid event"),
         }
 
@@ -2133,15 +2102,352 @@ mod tests {
         // this is a fix for a regression where the outbound connection was left in a pending state
         // and all subsequent dials to the remote peer timed out in in `TransitTunnelManager`
         // because the dial attempt didn't proceed as it was erroneously in the pending state
-        handle.connect(&remote_router_id).unwrap();
+        dial_tx.send(remote_router_id.clone()).await.unwrap();
 
-        match tokio::time::timeout(Duration::from_secs(5), handle.next())
+        match tokio::time::timeout(Duration::from_secs(5), transport_rx.recv())
             .await
             .expect("no timeout")
             .expect("to succeed")
         {
-            SubsystemEvent::ConnectionFailure { router } => assert_eq!(router, remote_router_id),
+            SubsystemEvent::ConnectionFailure { router_id: router } => {
+                assert_eq!(router, remote_router_id)
+            }
             _ => panic!("invalid event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn simultaneous_outbound_ssu2_connections() {
+        let config1 = Ssu2Config {
+            port: 0,
+            host: Some("127.0.0.1".parse().unwrap()),
+            publish: true,
+            static_key: [0xaa; 32],
+            intro_key: [0xbb; 32],
+        };
+        let (context1, address1) =
+            Ssu2Transport::<MockRuntime>::initialize(Some(config1)).await.unwrap();
+        let (router_info1, static_key1, signing_key1) = RouterInfoBuilder::default()
+            .with_ssu2(Ssu2Config {
+                port: address1.unwrap().socket_address.unwrap().port(),
+                host: Some("127.0.0.1".parse().unwrap()),
+                publish: true,
+                static_key: [0xaa; 32],
+                intro_key: [0xbb; 32],
+            })
+            .build();
+        let serialized1 = Bytes::from(router_info1.serialize(&signing_key1));
+        let storage1 = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let router_id1 = router_info1.identity.id();
+
+        let config2 = Ssu2Config {
+            port: 0,
+            host: Some("127.0.0.1".parse().unwrap()),
+            publish: true,
+            static_key: [0xcc; 32],
+            intro_key: [0xdd; 32],
+        };
+        let (context2, address2) =
+            Ssu2Transport::<MockRuntime>::initialize(Some(config2)).await.unwrap();
+
+        let (router_info2, static_key2, signing_key2) = RouterInfoBuilder::default()
+            .with_ssu2(Ssu2Config {
+                port: address2.unwrap().socket_address.unwrap().port(),
+                host: Some("127.0.0.1".parse().unwrap()),
+                publish: true,
+                static_key: [0xcc; 32],
+                intro_key: [0xdd; 32],
+            })
+            .build();
+        let serialized2 = Bytes::from(router_info2.serialize(&signing_key2));
+        let storage2 = ProfileStorage::<MockRuntime>::new(&[], &[]);
+        let router_id2 = router_info2.identity.id();
+
+        storage1.add_router(router_info2.clone());
+        storage2.add_router(router_info1.clone());
+
+        let (_event_mgr1, _event_subscriber1, event_handle1) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
+        let (_event_mgr2, _event_subscriber2, event_handle2) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
+        let (handle1, _netdb_rx1) = NetDbHandle::create();
+        let (handle2, _netdb_rx2) = NetDbHandle::create();
+
+        let ctx1 = RouterContext::new(
+            MockRuntime::register_metrics(vec![], None),
+            storage1.clone(),
+            router_info1.identity.id(),
+            serialized1.clone(),
+            static_key1,
+            signing_key1,
+            2u8,
+            event_handle1.clone(),
+        );
+        let ctx2 = RouterContext::new(
+            MockRuntime::register_metrics(vec![], None),
+            storage2.clone(),
+            router_info2.identity.id(),
+            serialized2.clone(),
+            static_key2,
+            signing_key2,
+            2u8,
+            event_handle2.clone(),
+        );
+
+        let (dial_tx1, dial_rx1) = channel(100);
+        let (transport_tx1, transport_rx1) = channel(100);
+        let mut builder1 = TransportManagerBuilder::<MockRuntime>::new(
+            ctx1,
+            router_info1,
+            true,
+            dial_rx1,
+            transport_tx1,
+        );
+        builder1.register_ssu2(context1.unwrap());
+        builder1.register_netdb_handle(handle1);
+        let transport1 = builder1.build();
+
+        let (dial_tx2, dial_rx2) = channel(100);
+        let (transport_tx2, transport_rx2) = channel(100);
+        let mut builder2 = TransportManagerBuilder::<MockRuntime>::new(
+            ctx2,
+            router_info2,
+            true,
+            dial_rx2,
+            transport_tx2,
+        );
+        builder2.register_ssu2(context2.unwrap());
+        builder2.register_netdb_handle(handle2);
+        let transport2 = builder2.build();
+
+        tokio::spawn(transport1);
+        tokio::spawn(transport2);
+
+        dial_tx1.try_send(router_id2.clone()).unwrap();
+        dial_tx2.try_send(router_id1.clone()).unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(5), transport_rx1.recv())
+            .await
+            .expect("no timeout")
+            .unwrap()
+        {
+            SubsystemEvent::ConnectionFailure { router_id } => {
+                assert_eq!(router_id, router_id2);
+            }
+            _ => panic!("invalid event"),
+        }
+
+        match tokio::time::timeout(Duration::from_secs(5), transport_rx2.recv())
+            .await
+            .expect("no timeout")
+            .unwrap()
+        {
+            SubsystemEvent::ConnectionFailure { router_id } => {
+                assert_eq!(router_id, router_id1);
+            }
+            _ => panic!("invalid event"),
+        }
+
+        dial_tx2.try_send(router_id1.clone()).unwrap();
+
+        let conn_tx1 = match tokio::time::timeout(Duration::from_secs(5), transport_rx1.recv())
+            .await
+            .expect("no timeout")
+            .unwrap()
+        {
+            SubsystemEvent::ConnectionEstablished { router_id, tx } => {
+                assert_eq!(router_id, router_id2);
+                tx
+            }
+            _ => panic!("invalid event"),
+        };
+
+        let conn_tx2 = match tokio::time::timeout(Duration::from_secs(5), transport_rx2.recv())
+            .await
+            .expect("no timeout")
+            .unwrap()
+        {
+            SubsystemEvent::ConnectionEstablished { router_id, tx } => {
+                assert_eq!(router_id, router_id1);
+                tx
+            }
+            _ => panic!("invalid event"),
+        };
+
+        conn_tx2
+            .try_send(OutboundMessage::Message(Message {
+                message_type: MessageType::DatabaseStore,
+                message_id: 1337u32,
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: vec![1, 1, 1, 1],
+            }))
+            .unwrap();
+
+        conn_tx1
+            .try_send(OutboundMessage::Message(Message {
+                message_type: MessageType::DatabaseStore,
+                message_id: 1338u32,
+                expiration: MockRuntime::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
+                payload: vec![2, 2, 2, 2],
+            }))
+            .unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(5), transport_rx1.recv())
+            .await
+            .expect("no timeout")
+            .unwrap()
+        {
+            SubsystemEvent::Message { messages } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].0, router_id2);
+                assert_eq!(messages[0].1.message_type, MessageType::DatabaseStore);
+                assert_eq!(messages[0].1.message_id, 1337u32);
+                assert_eq!(messages[0].1.payload, vec![1, 1, 1, 1]);
+            }
+            _ => panic!("invalid event"),
+        }
+
+        match tokio::time::timeout(Duration::from_secs(5), transport_rx2.recv())
+            .await
+            .expect("no timeout")
+            .unwrap()
+        {
+            SubsystemEvent::Message { messages } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].0, router_id1);
+                assert_eq!(messages[0].1.message_type, MessageType::DatabaseStore);
+                assert_eq!(messages[0].1.message_id, 1338u32);
+                assert_eq!(messages[0].1.payload, vec![2, 2, 2, 2]);
+            }
+            _ => panic!("invalid event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dial_connected_router() {
+        let (router_info, static_key, signing_key) = RouterInfoBuilder::default().build();
+        let serialized = Bytes::from(router_info.serialize(&signing_key));
+        let (handle, netdb_rx) = NetDbHandle::create();
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
+        let (storage, remote_router_id) = {
+            let (router_info, _static_key, _signing_key) = RouterInfoBuilder::default().build();
+            let router_id = router_info.identity.id();
+            let storage = ProfileStorage::<MockRuntime>::new(&[], &[]);
+            storage.add_router(router_info);
+
+            (storage, router_id)
+        };
+        let ctx = RouterContext::new(
+            MockRuntime::register_metrics(vec![], None),
+            storage,
+            router_info.identity.id(),
+            serialized.clone(),
+            static_key,
+            signing_key,
+            2u8,
+            event_handle.clone(),
+        );
+
+        let (dial_tx, dial_rx) = channel(100);
+        let (transport_tx, _transport_rx) = channel(100);
+        let mut builder = TransportManagerBuilder::<MockRuntime>::new(
+            ctx,
+            router_info,
+            true,
+            dial_rx,
+            transport_tx,
+        );
+        builder.register_netdb_handle(handle);
+        let mut manager = builder.build();
+
+        #[derive(Clone, Default)]
+        enum Command {
+            Connect(RouterId),
+            Accept(RouterId),
+            #[default]
+            Dummy,
+        }
+
+        pub struct MockTransport {
+            events: VecDeque<TransportEvent>,
+            tx: Sender<Command>,
+        }
+
+        impl Transport for MockTransport {
+            fn connect(&mut self, info: RouterInfo) {
+                self.tx.try_send(Command::Connect(info.identity.id())).unwrap();
+            }
+
+            fn accept(&mut self, router_id: &RouterId) {
+                self.tx.try_send(Command::Accept(router_id.clone())).unwrap();
+            }
+
+            fn reject(&mut self, _: &RouterId) {
+                unreachable!()
+            }
+        }
+
+        impl Stream for MockTransport {
+            type Item = TransportEvent;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                match self.events.pop_front() {
+                    Some(event) => {
+                        cx.waker().wake_by_ref();
+                        return Poll::Ready(Some(event));
+                    }
+                    None => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                }
+            }
+        }
+
+        // start mock transport with a single inbound event and send a dial request for that same
+        // router over `dial_rx` to `TransportManager`
+        let (tx, rx) = channel(64);
+
+        manager.transports.push(Box::new(MockTransport {
+            events: VecDeque::from_iter([TransportEvent::ConnectionEstablished {
+                router_id: remote_router_id.clone(),
+                direction: Direction::Inbound,
+            }]),
+            tx,
+        }));
+        dial_tx.try_send(remote_router_id.clone()).unwrap();
+
+        // verify that router doesn't exist in either connected or pending
+        assert!(!manager.routers.contains(&remote_router_id));
+        assert!(!manager.pending_connections.contains(&remote_router_id));
+
+        futures::future::poll_fn(|cx| {
+            let _ = manager.poll_unpin(cx);
+            Poll::Ready(())
+        })
+        .await;
+
+        // verify that `TransportManager` now has the router as a connected peer
+        assert!(manager.routers.contains(&remote_router_id));
+        assert!(!manager.pending_connections.contains(&remote_router_id));
+        assert!(netdb_rx.try_recv().is_err());
+
+        // verify the inbound connection is accepted
+        match rx.try_recv().unwrap() {
+            Command::Accept(router_id) => assert_eq!(router_id, remote_router_id),
+            _ => panic!("invalid command"),
+        }
+
+        // verify that the dial request is ignored
+        match rx.try_recv() {
+            Err(_) => {}
+            Ok(Command::Connect(router_id)) if router_id == remote_router_id =>
+                panic!("connected router dialed"),
+            _ => panic!("unexpected event"),
         }
     }
 }

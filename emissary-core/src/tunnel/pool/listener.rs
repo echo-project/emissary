@@ -22,10 +22,10 @@ use crate::{
     primitives::{MessageId, TunnelId},
     profile::ProfileStorage,
     runtime::{JoinSet, Runtime},
+    subsystem::SubsystemHandle,
     tunnel::{
         hop::{pending::PendingTunnel, Tunnel},
         pool::{context::TunnelPoolContextHandle, TUNNEL_BUILD_EXPIRATION},
-        routing_table::RoutingTable,
     },
     Error,
 };
@@ -67,24 +67,24 @@ pub enum ReceiveKind {
 }
 
 /// Tunnel build listener.
-pub struct TunnelBuildListener<R: Runtime, T: Tunnel + 'static> {
+pub struct TunnelBuildListener<R: Runtime, T: Tunnel<R> + 'static> {
     /// Pending tunnels.
-    pending: R::JoinSet<(TunnelId, crate::Result<T>)>,
+    pending: R::JoinSet<(TunnelId, crate::Result<(T, R::Instant)>)>,
 
     /// Profile storage.
     profile: ProfileStorage<R>,
 
     /// Routing table.
-    routing_table: RoutingTable,
+    subsystem_handle: SubsystemHandle,
 }
 
-impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
+impl<R: Runtime, T: Tunnel<R>> TunnelBuildListener<R, T> {
     /// Create new [`TunnelBuildListener`].
-    pub fn new(routing_table: RoutingTable, profile: ProfileStorage<R>) -> Self {
+    pub fn new(subsystem_handle: SubsystemHandle, profile: ProfileStorage<R>) -> Self {
         Self {
             pending: R::join_set(),
             profile,
-            routing_table,
+            subsystem_handle,
         }
     }
 
@@ -96,13 +96,14 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
     /// Add pending tunnel into set of tunnels that are being waited.
     pub fn add_pending_tunnel(
         &mut self,
-        tunnel: PendingTunnel<T>,
+        tunnel: PendingTunnel<R, T>,
         receive_kind: ReceiveKind,
         message_rx: oneshot::Receiver<Message>,
         dial_rx: oneshot::Receiver<()>,
     ) {
-        let routing_table = self.routing_table.clone();
+        let subsystem_handle = self.subsystem_handle.clone();
         let profile = self.profile.clone();
+        let now = R::now();
 
         self.pending.push(async move {
             match select(dial_rx, pin!(R::delay(Duration::from_secs(2 * 60)))).await {
@@ -133,7 +134,7 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
                 Either::Right((_, _)) => {
                     match receive_kind {
                         ReceiveKind::RoutingTable { message_id } =>
-                            routing_table.remove_listener(&message_id),
+                            subsystem_handle.remove_listener(&message_id),
                         ReceiveKind::Tunnel { message_id, handle } =>
                             handle.remove_listener(&message_id),
                         ReceiveKind::ZeroHop => {}
@@ -148,7 +149,7 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
                 Either::Left((Err(_), _)) => {
                     match receive_kind {
                         ReceiveKind::RoutingTable { message_id } =>
-                            routing_table.remove_listener(&message_id),
+                            subsystem_handle.remove_listener(&message_id),
                         ReceiveKind::Tunnel { message_id, handle } =>
                             handle.remove_listener(&message_id),
                         ReceiveKind::ZeroHop => {}
@@ -197,7 +198,7 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
                                 profile.tunnel_accepted(router_id);
                             });
 
-                            (tunnel_id, Ok(tunnel))
+                            (tunnel_id, Ok((tunnel, now)))
                         }
                     }
                 }
@@ -206,8 +207,8 @@ impl<R: Runtime, T: Tunnel> TunnelBuildListener<R, T> {
     }
 }
 
-impl<R: Runtime, T: Tunnel> Stream for TunnelBuildListener<R, T> {
-    type Item = (TunnelId, crate::Result<T>);
+impl<R: Runtime, T: Tunnel<R>> Stream for TunnelBuildListener<R, T> {
+    type Item = (TunnelId, crate::Result<(T, R::Instant)>);
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.pending.poll_next_unpin(cx)
@@ -219,14 +220,14 @@ mod tests {
     use super::*;
     use crate::{
         crypto::StaticPublicKey,
-        primitives::{MessageId, RouterId, Str, TunnelId},
+        primitives::{MessageId, Str, TunnelId},
         runtime::mock::MockRuntime,
+        subsystem::SubsystemHandle,
         tunnel::{
             hop::{
                 outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
                 TunnelBuildParameters, TunnelInfo,
             },
-            routing_table::RoutingKindRecycle,
             tests::make_router,
             NoiseContext,
         },
@@ -234,7 +235,6 @@ mod tests {
     use bytes::Bytes;
     use rand_core::RngCore;
     use std::time::Duration;
-    use thingbuf::mpsc;
 
     #[tokio::test]
     async fn response_channel_closed() {
@@ -255,26 +255,23 @@ mod tests {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, _next_router, _message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
-        let (manager_tx, _manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
-        let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::random(), manager_tx, transit_tx);
-        let mut listener = TunnelBuildListener::new(routing_table, profile_storage);
+        let (handle, _event_rx) = SubsystemHandle::new();
+        let mut listener = TunnelBuildListener::new(handle, profile_storage);
 
         let (tx, rx) = oneshot::channel();
         let (dial_tx, dial_rx) = oneshot::channel();
@@ -310,26 +307,23 @@ mod tests {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, _next_router, _message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
-        let (manager_tx, _manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
-        let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::random(), manager_tx, transit_tx);
-        let mut listener = TunnelBuildListener::new(routing_table, profile_storage);
+        let (handle, _event_rx) = SubsystemHandle::new();
+        let mut listener = TunnelBuildListener::new(handle, profile_storage);
 
         let (tx, rx) = oneshot::channel();
         let (dial_tx, dial_rx) = oneshot::channel();
@@ -365,26 +359,23 @@ mod tests {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, _next_router, _message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
-        let (manager_tx, _manager_rx) = mpsc::with_recycle(64, RoutingKindRecycle::default());
-        let (transit_tx, _transit_rx) = mpsc::channel(64);
-        let routing_table = RoutingTable::new(RouterId::random(), manager_tx, transit_tx);
-        let mut listener = TunnelBuildListener::new(routing_table, profile_storage);
+        let (handle, _event_rx) = SubsystemHandle::new();
+        let mut listener = TunnelBuildListener::new(handle, profile_storage);
 
         let (_tx, rx) = oneshot::channel();
         let (dial_tx, dial_rx) = oneshot::channel();

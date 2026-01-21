@@ -30,7 +30,7 @@ use crate::{
     runtime::{AddressBook, Runtime, Storage},
     sam::SamServer,
     shutdown::ShutdownContext,
-    subsystem::SubsystemKind,
+    subsystem::{SubsystemManager, SubsystemManagerContext},
     transport::{Ntcp2Transport, Ssu2Transport, TransportManager, TransportManagerBuilder},
     tunnel::{TunnelManager, TunnelManagerHandle},
 };
@@ -240,18 +240,6 @@ impl<R: Runtime> Router<R> {
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
         let local_router_id = local_router_info.identity.id();
         let mut address_info = ProtocolAddressInfo::default();
-        let (event_manager, event_subscriber, event_handle) =
-            EventManager::<R>::new(refresh_interval.and_then(|refresh_interval| {
-                if refresh_interval == 0 {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        "invalid refresh interval, using default value"
-                    );
-                    return None;
-                }
-
-                Some(Duration::from_secs(refresh_interval as u64))
-            }));
 
         // create router shutdown context and allocate handle `TransitTunnelManager`
         //
@@ -278,10 +266,29 @@ impl<R: Runtime> Router<R> {
                 let metrics = TransportManager::<R>::metrics(Vec::new());
                 let metrics = TunnelManager::<R>::metrics(metrics);
                 let metrics = NetDb::<R>::metrics(metrics);
+                #[cfg(feature = "events")]
+                let metrics = EventManager::<R>::metrics(metrics);
 
                 R::register_metrics(metrics, Some(port))
             }
         };
+
+        // initialize the event system
+        let (event_manager, event_subscriber, event_handle) = EventManager::<R>::new(
+            refresh_interval.and_then(|refresh_interval| {
+                if refresh_interval == 0 {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        "invalid refresh interval, using default value"
+                    );
+                    return None;
+                }
+
+                Some(Duration::from_secs(refresh_interval as u64))
+            }),
+            #[cfg(feature = "events")]
+            metrics_handle.clone(),
+        );
 
         // create router context that is passed onto other subsystems and contains a collection
         // of common objects utilized by all of the subsystems
@@ -297,11 +304,34 @@ impl<R: Runtime> Router<R> {
         );
         let sam_event_handle = router_ctx.event_handle().clone();
 
+        // create subsystem manager
+        let SubsystemManagerContext {
+            netdb_rx,
+            manager,
+            handle,
+            transit_rx,
+            transport_tx,
+            dial_rx,
+        } = SubsystemManager::<R>::new(
+            100,
+            0.,
+            router_ctx.router_id().clone(),
+            router_ctx.noise().clone(),
+        );
+
+        // spawn subsystem manager in the background
+        R::spawn(manager);
+
         // create transport manager builder and initialize & start enabled transports
         //
         // note: order of initialization is important
-        let mut transport_manager_builder =
-            TransportManagerBuilder::new(router_ctx.clone(), local_router_info, allow_local);
+        let mut transport_manager_builder = TransportManagerBuilder::new(
+            router_ctx.clone(),
+            local_router_info,
+            allow_local,
+            dial_rx,
+            transport_tx,
+        );
 
         // specify if transit tunnels are disabled
         //
@@ -311,49 +341,52 @@ impl<R: Runtime> Router<R> {
         // initialize and start tunnel manager
         //
         // acquire handle to exploratory tunnel pool which is given to `NetDb`
-        let (tunnel_manager_handle, exploratory_pool_handle, routing_table, netdb_msg_rx) = {
-            let transport_service =
-                transport_manager_builder.register_subsystem(SubsystemKind::Tunnel);
-            let (
-                tunnel_manager,
-                tunnel_manager_handle,
-                tunnel_pool_handle,
-                routing_table,
-                netdb_msg_rx,
-            ) = TunnelManager::<R>::new(
-                transport_service,
-                router_ctx.clone(),
-                exploratory.into(),
-                insecure_tunnels,
-                transit,
-                transit_shutdown_handle,
-                private_network_validator.clone()
-            );
+        // let (tunnel_manager_handle, exploratory_pool_handle, routing_table, netdb_msg_rx) = {
+        //     let transport_service =
+        //         transport_manager_builder.register_subsystem(SubsystemKind::Tunnel);
+        //     let (
+        //         tunnel_manager,
+        //         tunnel_manager_handle,
+        //         tunnel_pool_handle,
+        //         routing_table,
+        //         netdb_msg_rx,
+        //     ) = TunnelManager::<R>::new(
+        //         transport_service,
+        //         router_ctx.clone(),
+        //         exploratory.into(),
+        //         insecure_tunnels,
+        //         transit,
+        //         transit_shutdown_handle,
+        //         private_network_validator.clone()
+        //     );
 
+        let (tunnel_manager_handle, exploratory_pool_handle) = {
+            let (tunnel_manager, tunnel_manager_handle, tunnel_pool_handle) =
+                TunnelManager::<R>::new(
+                    router_ctx.clone(),
+                    exploratory.into(),
+                    insecure_tunnels,
+                    transit,
+                    transit_shutdown_handle,
+                    handle.clone(),
+                    transit_rx,
+                    private_network_validator.clone(),
+                );
             R::spawn(tunnel_manager);
 
-            (
-                tunnel_manager_handle,
-                tunnel_pool_handle,
-                routing_table,
-                netdb_msg_rx,
-            )
+            (tunnel_manager_handle, tunnel_pool_handle)
         };
 
         // initialize and start netdb
         let netdb_handle = {
-            let transport_service =
-                transport_manager_builder.register_subsystem(SubsystemKind::NetDb);
             let (netdb, netdb_handle) = NetDb::<R>::new(
                 router_ctx,
                 floodfill,
-                transport_service,
                 exploratory_pool_handle,
-                routing_table,
-                netdb_msg_rx,
-                private_network_validator.clone()
+                netdb_rx,
+                handle,
+                private_network_validator.clone(),
             );
-
             R::spawn(netdb);
 
             netdb_handle
