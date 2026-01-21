@@ -72,7 +72,7 @@ struct FakeRecordContext {
 }
 
 /// Pending tunnel.
-pub struct PendingTunnel<T: Tunnel> {
+pub struct PendingTunnel<R: Runtime, T: Tunnel<R>> {
     /// Context for local fake record.
     ///
     /// Set only for inbound builds.
@@ -80,6 +80,9 @@ pub struct PendingTunnel<T: Tunnel> {
 
     /// Pending tunnel hops.
     hops: VecDeque<TunnelHop>,
+
+    /// Metrics handle
+    metrics_handle: R::MetricsHandle,
 
     /// Name of the tunnel pool.
     name: Str,
@@ -97,7 +100,7 @@ pub struct PendingTunnel<T: Tunnel> {
     _tunnel: PhantomData<T>,
 }
 
-impl<R: Runtime> PendingTunnel<OutboundTunnel<R>> {
+impl<R: Runtime> PendingTunnel<R, OutboundTunnel<R>> {
     /// Get garlic tag of the outbound endpoint.
     pub fn garlic_tag(&self) -> Bytes {
         // obep must exist since it was created by us
@@ -105,19 +108,20 @@ impl<R: Runtime> PendingTunnel<OutboundTunnel<R>> {
     }
 }
 
-impl<T: Tunnel> PendingTunnel<T> {
+impl<R: Runtime, T: Tunnel<R>> PendingTunnel<R, T> {
     /// Get reference to [`PendingTunnel`]'s `TunnelId`.
     pub fn tunnel_id(&self) -> &TunnelId {
         &self.tunnel_id
     }
 
     /// Create new [`PendingTunnel`].
-    pub fn create_tunnel<R: Runtime>(
-        parameters: TunnelBuildParameters,
+    pub fn create_tunnel(
+        parameters: TunnelBuildParameters<R>,
     ) -> Result<(Self, RouterId, Message), TunnelError> {
         let TunnelBuildParameters {
             hops,
             message_id,
+            metrics_handle,
             name,
             noise,
             receiver,
@@ -353,6 +357,7 @@ impl<T: Tunnel> PendingTunnel<T> {
                     local_hash: router_id[..16].to_vec(),
                 }),
                 hops: tunnel_hops,
+                metrics_handle,
                 name,
                 num_records,
                 receiver,
@@ -727,7 +732,12 @@ impl<T: Tunnel> PendingTunnel<T> {
         Ok(accepted_hops
             .into_iter()
             .fold(
-                TunnelBuilder::new(self.name, self.tunnel_id, self.receiver),
+                TunnelBuilder::new(
+                    self.name,
+                    self.tunnel_id,
+                    self.receiver,
+                    self.metrics_handle,
+                ),
                 |builder, hop| builder.with_hop(hop),
             )
             .build())
@@ -752,18 +762,18 @@ mod test {
         router::context::RouterContext,
         runtime::mock::MockRuntime,
         shutdown::ShutdownContext,
+        subsystem::SubsystemHandle,
         tunnel::{
             garlic::{DeliveryInstructions as GarlicDeliveryInstructions, GarlicHandler},
             hop::inbound::InboundTunnel,
             noise::NoiseContext,
             pool::TunnelPoolBuildParameters,
-            routing_table::{RoutingKindRecycle, RoutingTable},
             tests::{make_router, TestTransitTunnelManager},
             transit::TransitTunnelManager,
         },
     };
     use bytes::Bytes;
-    use thingbuf::mpsc::{channel, with_recycle};
+    use thingbuf::mpsc::channel;
 
     #[tokio::test]
     async fn create_outbound_tunnel() {
@@ -784,20 +794,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(message.message_id, message_id.into());
@@ -807,8 +816,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), transit_manager)| {
-                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                Message::parse_short(&message).unwrap()
+                transit_manager.handle_short_tunnel_build(acc).unwrap().1
             },
         );
         assert_eq!(message.message_type, MessageType::TunnelGateway);
@@ -827,7 +835,7 @@ mod test {
     #[tokio::test]
     async fn create_inbound_tunnel() {
         let handle = MockRuntime::register_metrics(vec![], None);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None, handle.clone());
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -840,12 +848,10 @@ mod test {
             .into_iter()
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
-                    let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
+                    let (_transit_tx, transit_rx) = channel(16);
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
-                    let routing_table =
-                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+                    let (subsys_handle, _event_rx) = SubsystemHandle::new();
 
                     (
                         (router_hash, static_key.public(), shutdown_ctx),
@@ -865,7 +871,7 @@ mod test {
                                     2u8,
                                     event_handle.clone(),
                                 ),
-                                routing_table,
+                                subsys_handle,
                                 transit_rx,
                                 shutdown_handle,
                             ),
@@ -890,22 +896,21 @@ mod test {
         let (_tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<InboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Inbound {
-                        tunnel_id,
-                        router_id: local_hash.clone(),
-                    },
-                    receiver: ReceiverKind::Inbound {
-                        message_rx: rx,
-                        handle,
-                    },
+            PendingTunnel::<_, InboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: local_hash.clone(),
                 },
-            )
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
+            })
             .unwrap();
 
         let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
@@ -922,8 +927,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                Message::parse_short(&message).unwrap()
+                transit_manager.handle_short_tunnel_build(acc).unwrap().1
             },
         );
 
@@ -954,20 +958,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         let Message {
@@ -1055,20 +1058,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(message.message_id, message_id.into());
@@ -1105,20 +1107,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, mut message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(message.message_id, message_id.into());
@@ -1159,20 +1160,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(message.message_id, message_id.into());
@@ -1183,8 +1183,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), transit_manager)| {
-                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                Message::parse_short(&message).unwrap()
+                transit_manager.handle_short_tunnel_build(acc).unwrap().1
             },
         );
         assert_eq!(message.message_type, MessageType::TunnelGateway);
@@ -1216,20 +1215,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, mut message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(message.message_id, message_id.into());
@@ -1256,19 +1254,16 @@ mod test {
         let mut hops = Vec::<(Bytes, StaticPublicKey)>::new();
         let mut ctxs = Vec::<ShutdownContext<MockRuntime>>::new();
         let mut transit_managers = Vec::<TransitTunnelManager<MockRuntime>>::new();
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None, handle.clone());
 
         for _ in 0..3 {
             let (router_hash, static_key, signing_key, _noise_context, router_info) =
                 make_router(true);
 
-            let (transit_tx, transit_rx) = channel(16);
-            let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
+            let (_transit_tx, transit_rx) = channel(16);
             let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
             let shutdown_handle = shutdown_ctx.handle();
-
-            let routing_table =
-                RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+            let (subsys_handle, _event_rx) = SubsystemHandle::new();
 
             hops.push((router_hash, static_key.public()));
             ctxs.push(shutdown_ctx);
@@ -1286,7 +1281,7 @@ mod test {
                     2u8,
                     event_handle.clone(),
                 ),
-                routing_table,
+                subsys_handle,
                 transit_rx,
                 shutdown_handle,
             ));
@@ -1298,26 +1293,23 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, _next_router, message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise.clone(),
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: handle.clone(),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise.clone(),
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         let message = (0..transit_managers.len() - 1).fold(message, |message, i| {
-            let (_, msg, _) = transit_managers[i].handle_short_tunnel_build(message).unwrap();
-
-            Message::parse_short(&msg).unwrap()
+            transit_managers[i].handle_short_tunnel_build(message).unwrap().1
         });
 
         let (_, msg, _) = transit_managers[2].handle_short_tunnel_build(message).unwrap();
@@ -1326,7 +1318,7 @@ mod test {
             message_type,
             payload,
             ..
-        } = Message::parse_short(&msg).unwrap();
+        } = msg;
 
         assert_eq!(message_type, MessageType::TunnelGateway);
 
@@ -1372,20 +1364,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(message.message_id, message_id.into());
@@ -1448,20 +1439,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(message.message_id, message_id.into());
@@ -1506,7 +1496,7 @@ mod test {
     #[tokio::test]
     async fn hop_record_decrypt_error() {
         let handle = MockRuntime::register_metrics(vec![], None);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None, handle.clone());
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -1519,12 +1509,10 @@ mod test {
             .into_iter()
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
-                    let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
+                    let (_transit_tx, transit_rx) = channel(16);
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
-                    let routing_table =
-                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+                    let (subsys_handle, _event_rx) = SubsystemHandle::new();
 
                     (
                         (router_hash, static_key.public(), shutdown_ctx),
@@ -1544,7 +1532,7 @@ mod test {
                                     2u8,
                                     event_handle.clone(),
                                 ),
-                                routing_table,
+                                subsys_handle,
                                 transit_rx,
                                 shutdown_handle,
                             ),
@@ -1569,22 +1557,21 @@ mod test {
         let (_tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<InboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Inbound {
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Inbound {
-                        message_rx: rx,
-                        handle,
-                    },
+            PendingTunnel::<_, InboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
+            })
             .unwrap();
 
         let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
@@ -1599,8 +1586,7 @@ mod test {
         let mut message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                Message::parse_short(&message).unwrap()
+                transit_manager.handle_short_tunnel_build(acc).unwrap().1
             },
         );
 
@@ -1639,22 +1625,21 @@ mod test {
         } = TunnelPoolBuildParameters::new(Default::default());
         let (_tx, rx) = channel(64);
 
-        match PendingTunnel::<InboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-            TunnelBuildParameters {
-                hops: hops.clone(),
-                name: Str::from("tunnel-pool"),
-                noise: local_noise,
-                message_id,
-                tunnel_info: TunnelInfo::Inbound {
-                    tunnel_id,
-                    router_id: local_hash.clone(),
-                },
-                receiver: ReceiverKind::Inbound {
-                    message_rx: rx,
-                    handle,
-                },
+        match PendingTunnel::<_, InboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+            hops: hops.clone(),
+            metrics_handle: MockRuntime::register_metrics(vec![], None),
+            name: Str::from("tunnel-pool"),
+            noise: local_noise,
+            message_id,
+            tunnel_info: TunnelInfo::Inbound {
+                tunnel_id,
+                router_id: local_hash.clone(),
             },
-        ) {
+            receiver: ReceiverKind::Inbound {
+                message_rx: rx,
+                handle,
+            },
+        }) {
             Err(TunnelError::TooManyHops(8usize)) => {}
             _ => panic!("unexpected result"),
         }
@@ -1663,7 +1648,7 @@ mod test {
     #[tokio::test]
     async fn inbound_fake_record_router_hash_modified() {
         let handle = MockRuntime::register_metrics(vec![], None);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None, handle.clone());
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -1676,12 +1661,10 @@ mod test {
             .into_iter()
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
-                    let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
+                    let (_transit_tx, transit_rx) = channel(16);
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
-                    let routing_table =
-                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+                    let (subsys_handle, _event_rx) = SubsystemHandle::new();
 
                     (
                         (router_hash, static_key.public(), shutdown_ctx),
@@ -1701,7 +1684,7 @@ mod test {
                                     2u8,
                                     event_handle.clone(),
                                 ),
-                                routing_table,
+                                subsys_handle,
                                 transit_rx,
                                 shutdown_handle,
                             ),
@@ -1726,22 +1709,21 @@ mod test {
         let (_tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<InboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Inbound {
-                        tunnel_id,
-                        router_id: local_hash.clone(),
-                    },
-                    receiver: ReceiverKind::Inbound {
-                        message_rx: rx,
-                        handle,
-                    },
+            PendingTunnel::<_, InboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: local_hash.clone(),
                 },
-            )
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
+            })
             .unwrap();
 
         let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
@@ -1758,8 +1740,7 @@ mod test {
         let mut message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                Message::parse_short(&message).unwrap()
+                transit_manager.handle_short_tunnel_build(acc).unwrap().1
             },
         );
 
@@ -1783,7 +1764,7 @@ mod test {
     #[tokio::test]
     async fn inbound_fake_record_modified() {
         let handle = MockRuntime::register_metrics(vec![], None);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None, handle.clone());
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -1796,12 +1777,10 @@ mod test {
             .into_iter()
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
-                    let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
+                    let (_transit_tx, transit_rx) = channel(16);
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
-                    let routing_table =
-                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+                    let (subsys_handle, _event_rx) = SubsystemHandle::new();
 
                     (
                         (router_hash, static_key.public(), shutdown_ctx),
@@ -1821,7 +1800,7 @@ mod test {
                                     2u8,
                                     event_handle.clone(),
                                 ),
-                                routing_table,
+                                subsys_handle,
                                 transit_rx,
                                 shutdown_handle,
                             ),
@@ -1846,22 +1825,21 @@ mod test {
         let (_tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<InboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Inbound {
-                        tunnel_id,
-                        router_id: local_hash.clone(),
-                    },
-                    receiver: ReceiverKind::Inbound {
-                        message_rx: rx,
-                        handle,
-                    },
+            PendingTunnel::<_, InboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: local_hash.clone(),
                 },
-            )
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
+            })
             .unwrap();
 
         let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
@@ -1878,8 +1856,7 @@ mod test {
         let mut message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                Message::parse_short(&message).unwrap()
+                transit_manager.handle_short_tunnel_build(acc).unwrap().1
             },
         );
 
@@ -1903,7 +1880,7 @@ mod test {
     #[tokio::test]
     async fn empty_payload_inbound() {
         let handle = MockRuntime::register_metrics(vec![], None);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None, handle.clone());
 
         let (hops, mut transit_managers): (
             Vec<(Bytes, StaticPublicKey, ShutdownContext<MockRuntime>)>,
@@ -1916,12 +1893,10 @@ mod test {
             .into_iter()
             .map(
                 |(router_hash, static_key, signing_key, noise_context, router_info)| {
-                    let (transit_tx, transit_rx) = channel(16);
-                    let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
+                    let (_transit_tx, transit_rx) = channel(16);
                     let mut shutdown_ctx = ShutdownContext::<MockRuntime>::new();
                     let shutdown_handle = shutdown_ctx.handle();
-                    let routing_table =
-                        RoutingTable::new(RouterId::from(&router_hash), manager_tx, transit_tx);
+                    let (subsys_handle, _event_rx) = SubsystemHandle::new();
 
                     (
                         (router_hash, static_key.public(), shutdown_ctx),
@@ -1941,7 +1916,7 @@ mod test {
                                     2u8,
                                     event_handle.clone(),
                                 ),
-                                routing_table,
+                                subsys_handle,
                                 transit_rx,
                                 shutdown_handle,
                             ),
@@ -1966,22 +1941,21 @@ mod test {
         let (_tx, rx) = channel(64);
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<InboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Inbound {
-                        tunnel_id,
-                        router_id: local_hash.clone(),
-                    },
-                    receiver: ReceiverKind::Inbound {
-                        message_rx: rx,
-                        handle,
-                    },
+            PendingTunnel::<_, InboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Inbound {
+                    tunnel_id,
+                    router_id: local_hash.clone(),
                 },
-            )
+                receiver: ReceiverKind::Inbound {
+                    message_rx: rx,
+                    handle,
+                },
+            })
             .unwrap();
 
         let message = match transit_managers[0].0.handle_message(message).unwrap().next() {
@@ -1998,8 +1972,7 @@ mod test {
         let mut message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), (_, transit_manager))| {
-                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                Message::parse_short(&message).unwrap()
+                transit_manager.handle_short_tunnel_build(acc).unwrap().1
             },
         );
 
@@ -2035,20 +2008,19 @@ mod test {
         let gateway = TunnelId::from(MockRuntime::rng().next_u32());
 
         let (pending_tunnel, next_router, message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: hops.clone(),
-                    name: Str::from("tunnel-pool"),
-                    noise: local_noise,
-                    message_id,
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway,
-                        tunnel_id,
-                        router_id: local_hash,
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: hops.clone(),
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: local_noise,
+                message_id,
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway,
+                    tunnel_id,
+                    router_id: local_hash,
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(message.message_id, message_id.into());
@@ -2058,8 +2030,7 @@ mod test {
         let message = hops.iter().zip(transit_managers.iter_mut()).fold(
             message,
             |acc, ((_, _), transit_manager)| {
-                let (_, message, _) = transit_manager.handle_short_tunnel_build(acc).unwrap();
-                Message::parse_short(&message).unwrap()
+                transit_manager.handle_short_tunnel_build(acc).unwrap().1
             },
         );
         assert_eq!(message.message_type, MessageType::TunnelGateway);

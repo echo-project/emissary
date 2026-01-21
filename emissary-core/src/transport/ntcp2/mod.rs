@@ -21,12 +21,15 @@ use crate::{
     error::{ConnectionError, Error},
     primitives::{RouterAddress, RouterId, RouterInfo},
     router::context::RouterContext,
-    runtime::{Counter, JoinSet, MetricType, MetricsHandle, Runtime, TcpListener},
-    subsystem::SubsystemHandle,
+    runtime::{
+        Counter, Gauge, Histogram, Instant, JoinSet, MetricType, MetricsHandle, Runtime,
+        TcpListener,
+    },
+    subsystem::SubsystemEvent,
     transport::{
-        metrics::*,
         ntcp2::{
             listener::Ntcp2Listener,
+            metrics::*,
             session::{Ntcp2Session, SessionManager},
         },
         TerminationReason, Transport, TransportEvent,
@@ -42,9 +45,11 @@ use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
+use thingbuf::mpsc::Sender;
 
 mod listener;
 mod message;
+mod metrics;
 mod options;
 mod session;
 
@@ -110,7 +115,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
         context: Ntcp2Context<R>,
         allow_local: bool,
         router_ctx: RouterContext<R>,
-        subsystem_handle: SubsystemHandle,
+        transport_tx: Sender<SubsystemEvent>,
     ) -> Self {
         let Ntcp2Context {
             config,
@@ -122,8 +127,8 @@ impl<R: Runtime> Ntcp2Transport<R> {
             config.key,
             config.iv,
             router_ctx.clone(),
-            subsystem_handle,
             allow_local,
+            transport_tx,
         );
 
         tracing::info!(
@@ -146,7 +151,7 @@ impl<R: Runtime> Ntcp2Transport<R> {
 
     /// Collect `Ntcp2Transport`-related metric counters, gauges and histograms.
     pub fn metrics(metrics: Vec<MetricType>) -> Vec<MetricType> {
-        metrics
+        register_metrics(metrics)
     }
 
     /// Initialize [`Ntcp2Transport`].
@@ -223,7 +228,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
 
         let future = self.session_manager.create_session(router);
         self.pending_handshakes.push(future);
-        self.router_ctx.metrics_handle().counter(NUM_OUTBOUND).increment(1);
+        self.router_ctx.metrics_handle().counter(NUM_OUTBOUND_NTCP2).increment(1);
 
         if let Some(waker) = self.waker.take() {
             waker.wake_by_ref();
@@ -238,6 +243,7 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                     %router_id,
                     "ntcp2 session accepted, starting event loop",
                 );
+                self.router_ctx.metrics_handle().gauge(NUM_CONNECTIONS).increment(1);
 
                 self.open_connections.push(session.run());
 
@@ -264,7 +270,6 @@ impl<R: Runtime> Transport for Ntcp2Transport<R> {
                     %router_id,
                     "ntcp2 session rejected, closing connection",
                 );
-                self.router_ctx.metrics_handle().counter(NUM_REJECTED).increment(1);
                 drop(connection);
             }
             None => {
@@ -286,8 +291,10 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
         match self.open_connections.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some((router_id, reason))) =>
-                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason })),
+            Poll::Ready(Some((router_id, reason))) => {
+                self.router_ctx.metrics_handle().gauge(NUM_CONNECTIONS).decrement(1);
+                return Poll::Ready(Some(TransportEvent::ConnectionClosed { router_id, reason }));
+            }
         }
 
         loop {
@@ -302,7 +309,7 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
 
                     let future = self.session_manager.accept_session(stream);
                     self.pending_handshakes.push(future);
-                    self.router_ctx.metrics_handle().counter(NUM_INBOUND).increment(1);
+                    self.router_ctx.metrics_handle().counter(NUM_INBOUND_NTCP2).increment(1);
                 }
             }
         }
@@ -317,6 +324,11 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                         router = %session.router().identity.id(),
                         "ntcp2 connection opened",
                     );
+                    self.router_ctx.metrics_handle().counter(NUM_HANDSHAKE_SUCCESSES).increment(1);
+                    self.router_ctx
+                        .metrics_handle()
+                        .histogram(HANDSHAKE_DURATION)
+                        .record(session.started().elapsed().as_millis() as f64);
 
                     // get router info from the session, store the session itself into
                     // `pending_connections` and inform `TransportManager` that new ntcp2 connection
@@ -358,13 +370,24 @@ impl<R: Runtime> Stream for Ntcp2Transport<R> {
                             ?error,
                             "failed to connect to router",
                         );
+                        self.router_ctx
+                            .metrics_handle()
+                            .counter(NUM_HANDSHAKE_FAILURES)
+                            .increment(1);
+
                         return Poll::Ready(Some(TransportEvent::ConnectionFailure { router_id }));
                     }
-                    None => tracing::trace!(
-                        target: LOG_TARGET,
-                        ?error,
-                        "failed to accept inbound connection",
-                    ),
+                    None => {
+                        tracing::trace!(
+                            target: LOG_TARGET,
+                            ?error,
+                            "failed to accept inbound connection",
+                        );
+                        self.router_ctx
+                            .metrics_handle()
+                            .counter(NUM_HANDSHAKE_FAILURES)
+                            .increment(1);
+                    }
                 },
                 Poll::Ready(None) => return Poll::Ready(None),
             }

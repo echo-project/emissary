@@ -25,14 +25,18 @@ use crate::{
             data::{EncryptedTunnelData, MessageKind, TunnelData},
             gateway::TunnelGateway,
         },
-        Message, MessageBuilder, MessageType,
+        Message, MessageType,
     },
     primitives::{MessageId, RouterId, TunnelId},
-    runtime::Runtime,
+    runtime::{Counter, Gauge, MetricsHandle, Runtime},
+    subsystem::SubsystemHandle,
     tunnel::{
         fragment::{FragmentHandler, OwnedDeliveryInstructions},
+        metrics::{
+            NUM_DROPPED_MESSAGES, NUM_OBEPS, NUM_ROUTED_MESSAGES, NUM_TRANSIT_TUNNELS,
+            TOTAL_TRANSIT_TUNNELS,
+        },
         noise::TunnelKeys,
-        routing_table::RoutingTable,
         transit::{TransitTunnel, TRANSIT_TUNNEL_EXPIRATION},
     },
 };
@@ -66,18 +70,17 @@ pub struct OutboundEndpoint<R: Runtime> {
     /// Used inbound bandwidth.
     inbound_bandwidth: usize,
 
-    /// Used outbound bandwidth.
-    outbound_bandwidth: usize,
-
     /// RX channel for receiving messages.
     message_rx: Receiver<Message>,
 
     /// Metrics handle.
-    #[allow(unused)]
     metrics_handle: R::MetricsHandle,
 
-    /// Routing table.
-    routing_table: RoutingTable,
+    /// Used outbound bandwidth.
+    outbound_bandwidth: usize,
+
+    /// Subsystem handle.
+    subsystem_handle: SubsystemHandle,
 
     /// Tunnel ID.
     tunnel_id: TunnelId,
@@ -144,7 +147,7 @@ impl<R: Runtime> OutboundEndpoint<R> {
     fn handle_tunnel_data(
         &mut self,
         tunnel_data: &EncryptedTunnelData,
-    ) -> crate::Result<impl Iterator<Item = (RouterId, Vec<u8>)>> {
+    ) -> crate::Result<impl Iterator<Item = (RouterId, Message)>> {
         tracing::trace!(
             target: LOG_TARGET,
             tunnel_id = %self.tunnel_id,
@@ -256,12 +259,12 @@ impl<R: Runtime> OutboundEndpoint<R> {
                             "router delivery",
                         );
 
-                        let message = MessageBuilder::short()
-                            .with_message_type(message.message_type)
-                            .with_message_id(message.message_id)
-                            .with_expiration(message.expiration)
-                            .with_payload(&message.payload)
-                            .build();
+                        let message = Message {
+                            message_type: message.message_type,
+                            message_id: message.message_id,
+                            expiration: message.expiration,
+                            payload: message.payload,
+                        };
 
                         Some((router, message))
                     }
@@ -283,18 +286,18 @@ impl<R: Runtime> OutboundEndpoint<R> {
                         }
                         .serialize();
 
-                        let message = MessageBuilder::short()
-                            .with_message_type(MessageType::TunnelGateway)
-                            .with_message_id(R::rng().next_u32())
-                            .with_expiration(R::time_since_epoch() + Duration::from_secs(8))
-                            .with_payload(&payload)
-                            .build();
+                        let message = Message {
+                            message_type: MessageType::TunnelGateway,
+                            message_id: R::rng().next_u32(),
+                            expiration: R::time_since_epoch() + Duration::from_secs(8),
+                            payload,
+                        };
 
                         Some((router, message))
                     }
                 }
             })
-            .collect::<Vec<(RouterId, Vec<u8>)>>();
+            .collect::<Vec<(RouterId, Message)>>();
 
         Ok(messages.into_iter())
     }
@@ -307,20 +310,24 @@ impl<R: Runtime> TransitTunnel<R> for OutboundEndpoint<R> {
         _next_tunnel_id: TunnelId,
         _next_router: RouterId,
         tunnel_keys: TunnelKeys,
-        routing_table: RoutingTable,
+        subsystem_handle: SubsystemHandle,
         metrics_handle: R::MetricsHandle,
         message_rx: Receiver<Message>,
         event_handle: EventHandle<R>,
     ) -> Self {
+        metrics_handle.gauge(NUM_OBEPS).increment(1);
+        metrics_handle.gauge(NUM_TRANSIT_TUNNELS).increment(1);
+        metrics_handle.counter(TOTAL_TRANSIT_TUNNELS).increment(1);
+
         OutboundEndpoint {
             event_handle,
             expiration_timer: R::timer(TRANSIT_TUNNEL_EXPIRATION),
-            fragment: FragmentHandler::new(),
+            fragment: FragmentHandler::new(metrics_handle.clone()),
             inbound_bandwidth: 0usize,
             outbound_bandwidth: 0usize,
             message_rx,
             metrics_handle,
-            routing_table,
+            subsystem_handle,
             tunnel_id,
             tunnel_keys,
         }
@@ -339,6 +346,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
                         tunnel_id = %self.tunnel_id,
                         "message channel closed",
                     );
+                    self.metrics_handle.gauge(NUM_OBEPS).decrement(1);
                     return Poll::Ready(self.tunnel_id);
                 }
                 Some(message) => {
@@ -352,6 +360,7 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
                             "unsupported message",
                         );
                         debug_assert!(false);
+                        self.metrics_handle.counter(NUM_DROPPED_MESSAGES).increment(1);
                         continue;
                     };
 
@@ -362,20 +371,27 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
                             "malformed `TunnelData` message",
                         );
                         debug_assert!(false);
+                        self.metrics_handle.counter(NUM_DROPPED_MESSAGES).increment(1);
                         continue;
                     };
 
                     match self.handle_tunnel_data(&message) {
                         Ok(messages) => messages.into_iter().for_each(|(router, message)| {
-                            self.outbound_bandwidth += message.len();
+                            self.outbound_bandwidth += message.serialized_len_short();
 
-                            if let Err(error) = self.routing_table.send_message(router, message) {
-                                tracing::error!(
-                                    target: LOG_TARGET,
-                                    tunnel_id = %self.tunnel_id,
-                                    ?error,
-                                    "failed to send message",
-                                )
+                            match self.subsystem_handle.send(&router, message) {
+                                Ok(()) => {
+                                    self.metrics_handle.counter(NUM_ROUTED_MESSAGES).increment(1);
+                                }
+                                Err(error) => {
+                                    tracing::error!(
+                                        target: LOG_TARGET,
+                                        tunnel_id = %self.tunnel_id,
+                                        ?error,
+                                        "failed to send message",
+                                    );
+                                    self.metrics_handle.counter(NUM_DROPPED_MESSAGES).increment(1);
+                                }
                             }
                         }),
                         Err(error) => tracing::warn!(
@@ -397,6 +413,9 @@ impl<R: Runtime> Future for OutboundEndpoint<R> {
         }
 
         if self.expiration_timer.poll_unpin(cx).is_ready() {
+            self.metrics_handle.gauge(NUM_OBEPS).decrement(1);
+            self.metrics_handle.gauge(NUM_TRANSIT_TUNNELS).decrement(1);
+
             return Poll::Ready(self.tunnel_id);
         }
 
@@ -415,20 +434,20 @@ mod tests {
     use crate::{
         crypto::{EphemeralPublicKey, StaticPrivateKey},
         events::EventManager,
-        i2np::HopRole,
+        i2np::{HopRole, MessageBuilder},
         primitives::Str,
         runtime::mock::MockRuntime,
+        subsystem::{SubsystemHandle, SubsystemManagerEvent},
         tunnel::{
             hop::{
                 outbound::OutboundTunnel, pending::PendingTunnel, ReceiverKind,
                 TunnelBuildParameters, TunnelInfo,
             },
             noise::NoiseContext,
-            routing_table::RoutingKindRecycle,
         },
     };
     use bytes::Bytes;
-    use thingbuf::mpsc::{channel, with_recycle};
+    use thingbuf::mpsc::channel;
 
     // outbound endpoint and the target router are the same router
     //
@@ -436,11 +455,9 @@ mod tests {
     #[tokio::test]
     async fn obep_routes_message_to_self() {
         let (_tx, rx) = channel(64);
-        let (transit_tx, transit_rx) = channel(64);
-        let (manager_tx, manager_rx) = with_recycle(64, RoutingKindRecycle::default());
-        let router_id = RouterId::from(vec![1, 2, 3, 4]);
-        let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (subsys_handle, event_rx) = SubsystemHandle::new();
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
 
         let obep_key = StaticPrivateKey::random(MockRuntime::rng());
         let obep_router_id = RouterId::random();
@@ -449,26 +466,25 @@ mod tests {
         let obgw_router_id = RouterId::random();
 
         let (pending, router_id, mut message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: vec![(
-                        Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
-                        obep_key.public(),
-                    )],
-                    name: Str::from("tunnel-pool"),
-                    noise: NoiseContext::new(
-                        obgw_key,
-                        Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
-                    ),
-                    message_id: MessageId::from(MockRuntime::rng().next_u32()),
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway: TunnelId::random(),
-                        tunnel_id: TunnelId::random(),
-                        router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: vec![(
+                    Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+                    obep_key.public(),
+                )],
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: NoiseContext::new(
+                    obgw_key,
+                    Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                ),
+                message_id: MessageId::from(MockRuntime::rng().next_u32()),
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway: TunnelId::random(),
+                    tunnel_id: TunnelId::random(),
+                    router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(router_id, obep_router_id);
@@ -525,7 +541,6 @@ mod tests {
         let (_to_router, mut messages) = obgw.send_to_router(obep_router_id.clone(), message);
         let message = messages.next().expect("to exist");
 
-        let message = Message::parse_short(&message).unwrap();
         let parsed = EncryptedTunnelData::parse(&message.payload).unwrap();
 
         let mut tunnel = OutboundEndpoint::<MockRuntime>::new(
@@ -533,7 +548,7 @@ mod tests {
             TunnelId::random(),
             RouterId::random(),
             obep_keys,
-            routing_table,
+            subsys_handle,
             MockRuntime::register_metrics(vec![], None),
             rx,
             event_handle.clone(),
@@ -542,19 +557,25 @@ mod tests {
         let (router_id, message) = tunnel.handle_tunnel_data(&parsed).unwrap().next().unwrap();
         assert_eq!(router_id, obep_router_id);
 
-        tunnel.routing_table.send_message(router_id, message).unwrap();
-        assert!(manager_rx.try_recv().is_ok());
-        assert!(transit_rx.try_recv().is_err());
+        tunnel.subsystem_handle.send(&router_id, message).unwrap();
+
+        match event_rx.try_recv().unwrap() {
+            SubsystemManagerEvent::Message {
+                router_id: remote_router,
+                ..
+            } => {
+                assert_eq!(remote_router, router_id);
+            }
+            _ => panic!("invalid event"),
+        }
     }
 
     #[tokio::test]
     async fn expired_unfragmented_message() {
         let (_tx, rx) = channel(64);
-        let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
-        let router_id = RouterId::from(vec![1, 2, 3, 4]);
-        let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (subsys_handle, _event_rx) = SubsystemHandle::new();
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
 
         let obep_key = StaticPrivateKey::random(MockRuntime::rng());
         let obep_router_id = RouterId::random();
@@ -563,26 +584,25 @@ mod tests {
         let obgw_router_id = RouterId::random();
 
         let (pending, router_id, mut message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: vec![(
-                        Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
-                        obep_key.public(),
-                    )],
-                    name: Str::from("tunnel-pool"),
-                    noise: NoiseContext::new(
-                        obgw_key,
-                        Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
-                    ),
-                    message_id: MessageId::from(MockRuntime::rng().next_u32()),
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway: TunnelId::random(),
-                        tunnel_id: TunnelId::random(),
-                        router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: vec![(
+                    Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+                    obep_key.public(),
+                )],
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: NoiseContext::new(
+                    obgw_key,
+                    Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                ),
+                message_id: MessageId::from(MockRuntime::rng().next_u32()),
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway: TunnelId::random(),
+                    tunnel_id: TunnelId::random(),
+                    router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(router_id, obep_router_id);
@@ -639,7 +659,6 @@ mod tests {
         let (_to_router, mut messages) = obgw.send_to_router(obep_router_id.clone(), message);
         let message = messages.next().expect("to exist");
 
-        let message = Message::parse_short(&message).unwrap();
         let parsed = EncryptedTunnelData::parse(&message.payload).unwrap();
 
         let mut tunnel = OutboundEndpoint::<MockRuntime>::new(
@@ -647,7 +666,7 @@ mod tests {
             TunnelId::random(),
             RouterId::random(),
             obep_keys,
-            routing_table,
+            subsys_handle,
             MockRuntime::register_metrics(vec![], None),
             rx,
             event_handle.clone(),
@@ -658,11 +677,9 @@ mod tests {
     #[tokio::test]
     async fn expired_fragmented_message() {
         let (_tx, rx) = channel(64);
-        let (transit_tx, _transit_rx) = channel(64);
-        let (manager_tx, _manager_rx) = with_recycle(64, RoutingKindRecycle::default());
-        let router_id = RouterId::from(vec![1, 2, 3, 4]);
-        let routing_table = RoutingTable::new(router_id.clone(), manager_tx, transit_tx);
-        let (_event_mgr, _event_subscriber, event_handle) = EventManager::new(None);
+        let (subsys_handle, _event_rx) = SubsystemHandle::new();
+        let (_event_mgr, _event_subscriber, event_handle) =
+            EventManager::new(None, MockRuntime::register_metrics(vec![], None));
 
         let obep_key = StaticPrivateKey::random(MockRuntime::rng());
         let obep_router_id = RouterId::random();
@@ -671,26 +688,25 @@ mod tests {
         let obgw_router_id = RouterId::random();
 
         let (pending, router_id, mut message) =
-            PendingTunnel::<OutboundTunnel<MockRuntime>>::create_tunnel::<MockRuntime>(
-                TunnelBuildParameters {
-                    hops: vec![(
-                        Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
-                        obep_key.public(),
-                    )],
-                    name: Str::from("tunnel-pool"),
-                    noise: NoiseContext::new(
-                        obgw_key,
-                        Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
-                    ),
-                    message_id: MessageId::from(MockRuntime::rng().next_u32()),
-                    tunnel_info: TunnelInfo::Outbound {
-                        gateway: TunnelId::random(),
-                        tunnel_id: TunnelId::random(),
-                        router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
-                    },
-                    receiver: ReceiverKind::Outbound,
+            PendingTunnel::<_, OutboundTunnel<MockRuntime>>::create_tunnel(TunnelBuildParameters {
+                hops: vec![(
+                    Bytes::from(Into::<Vec<u8>>::into(obep_router_id.clone())),
+                    obep_key.public(),
+                )],
+                metrics_handle: MockRuntime::register_metrics(vec![], None),
+                name: Str::from("tunnel-pool"),
+                noise: NoiseContext::new(
+                    obgw_key,
+                    Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
+                ),
+                message_id: MessageId::from(MockRuntime::rng().next_u32()),
+                tunnel_info: TunnelInfo::Outbound {
+                    gateway: TunnelId::random(),
+                    tunnel_id: TunnelId::random(),
+                    router_id: Bytes::from(Into::<Vec<u8>>::into(obgw_router_id.clone())),
                 },
-            )
+                receiver: ReceiverKind::Outbound,
+            })
             .unwrap();
 
         assert_eq!(router_id, obep_router_id);
@@ -750,7 +766,7 @@ mod tests {
             TunnelId::random(),
             RouterId::random(),
             obep_keys,
-            routing_table,
+            subsys_handle,
             MockRuntime::register_metrics(vec![], None),
             rx,
             event_handle.clone(),
@@ -762,7 +778,7 @@ mod tests {
 
         // send first two fragments and verify there's no output
         for i in 0..2 {
-            let message = Message::parse_short(&messages[i]).unwrap();
+            let message = &messages[i].clone();
             let parsed = EncryptedTunnelData::parse(&message.payload).unwrap();
 
             assert!(tunnel.handle_tunnel_data(&parsed).unwrap().collect::<Vec<_>>().is_empty());
@@ -772,7 +788,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // send third message and verify there's no output because the fragments were expired
-        let message = Message::parse_short(&messages[2]).unwrap();
+        let message = &messages[2].clone();
         let parsed = EncryptedTunnelData::parse(&message.payload).unwrap();
 
         assert!(tunnel.handle_tunnel_data(&parsed).unwrap().collect::<Vec<_>>().is_empty());
