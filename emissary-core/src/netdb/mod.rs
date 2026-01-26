@@ -36,7 +36,7 @@ use crate::{
         Message, MessageBuilder, MessageType, I2NP_MESSAGE_EXPIRATION,
     },
     netdb::{metrics::*, query::*},
-    primitives::{LeaseSet2, RouterId, RouterInfo},
+    primitives::{DestinationId, LeaseSet2, RouterId, RouterInfo},
     profile::Bucket,
     router::context::RouterContext,
     runtime::{Counter, Gauge, Histogram, Instant, JoinSet, MetricType, MetricsHandle, Runtime},
@@ -461,6 +461,7 @@ impl<R: Runtime> NetDb<R> {
 
         tracing::trace!(
             target: LOG_TARGET,
+            key = ?base32_encode(&key),
             %destination_id,
             "lease set store",
         );
@@ -495,8 +496,17 @@ impl<R: Runtime> NetDb<R> {
                 tunnel_id,
                 router_id,
             } => {
-                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    key = ?base32_encode(&key),
+                    %destination_id,
+                    ?reply_token,
+                    %router_id,
+                    %tunnel_id,
+                    "send lease set store reply to tunnel",
+                );
 
+                let expires = R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION;
                 let message = MessageBuilder::standard()
                     .with_expiration(expires)
                     .with_message_type(MessageType::DeliveryStatus)
@@ -526,6 +536,15 @@ impl<R: Runtime> NetDb<R> {
                 reply_token,
                 router_id,
             } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    key = ?base32_encode(&key),
+                    %destination_id,
+                    ?reply_token,
+                    %router_id,
+                    "send lease set store reply to router",
+                );
+
                 let message = Message {
                     expiration: R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
                     message_type: MessageType::DeliveryStatus,
@@ -580,11 +599,15 @@ impl<R: Runtime> NetDb<R> {
         reply_type: ReplyType,
         ignore: HashSet<RouterId>,
     ) {
+        let b32_key = base32_encode(&key);
+        let destination_id = DestinationId::from(&key);
+
         let (message_type, message) = match self.lease_sets.get(&key) {
             None => {
                 tracing::trace!(
                     target: LOG_TARGET,
-                    key = ?key[..4],
+                    key = %b32_key,
+                    %destination_id,
                     "lease set not found from local storage",
                 );
 
@@ -609,7 +632,8 @@ impl<R: Runtime> NetDb<R> {
             Some((lease_set, _)) => {
                 tracing::trace!(
                     target: LOG_TARGET,
-                    key = ?key[..4],
+                    key = %b32_key,
+                    %destination_id,
                     "lease set found from local storage",
                 );
 
@@ -631,6 +655,16 @@ impl<R: Runtime> NetDb<R> {
                 tunnel_id,
                 router_id,
             } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    key = %b32_key,
+                    %destination_id,
+                    ?message_type,
+                    %router_id,
+                    %tunnel_id,
+                    "send lease set query result to tunnel",
+                );
+
                 let message = MessageBuilder::standard()
                     .with_expiration(R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION)
                     .with_message_type(message_type)
@@ -654,6 +688,15 @@ impl<R: Runtime> NetDb<R> {
                 }
             }
             ReplyType::Router { router_id } => {
+                tracing::trace!(
+                    target: LOG_TARGET,
+                    key = %b32_key,
+                    %destination_id,
+                    ?message_type,
+                    %router_id,
+                    "send lease set query result to router",
+                );
+
                 let message = Message {
                     expiration: R::time_since_epoch() + I2NP_MESSAGE_EXPIRATION,
                     message_type,
@@ -684,11 +727,13 @@ impl<R: Runtime> NetDb<R> {
         reply_type: ReplyType,
         ignore: HashSet<RouterId>,
     ) {
+        let router_id = RouterId::from(&key);
+
         let (message_type, message) = match self.router_infos.get(&key) {
             None => {
                 tracing::trace!(
                     target: LOG_TARGET,
-                    key = ?key[..4],
+                    %router_id,
                     "router info not found from local storage",
                 );
 
@@ -713,7 +758,7 @@ impl<R: Runtime> NetDb<R> {
             Some((router_info, _)) => {
                 tracing::trace!(
                     target: LOG_TARGET,
-                    key = ?key[..4],
+                    %router_id,
                     "router info found from local storage",
                 );
 
@@ -1337,6 +1382,7 @@ impl<R: Runtime> NetDb<R> {
         tracing::debug!(
             target: LOG_TARGET,
             key = ?base32_encode(&key),
+            destination_id = %DestinationId::from(&key),
             %floodfill,
             "query lease set",
         );
