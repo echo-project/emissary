@@ -1447,7 +1447,7 @@ async fn connect_using_b32_i2p(kind: TransportKind) {
 
     let mut stream = tokio::time::timeout(
         Duration::from_secs(10),
-        session2.connect("fnkextln5uh3lafgvmuzcdr736cfced5f6fabdf5kq5dv5rj4jxq.b32.i2p"),
+        session2.connect("fnkextln5uh3lafgvmuzcdr736cfced5f6fabdf5kq5dv5rj4jxq.b32.echo"),
     )
     .await
     .expect("no timeout")
@@ -1706,7 +1706,7 @@ async fn host_lookup(kind: TransportKind) {
     .expect("no timeout")
     .expect("to succeed");
 
-    let mut stream = tokio::time::timeout(Duration::from_secs(10), session2.connect("host.i2p"))
+    let mut stream = tokio::time::timeout(Duration::from_secs(10), session2.connect("host.echo"))
         .await
         .expect("no timeout")
         .expect("to succeed");

@@ -51,19 +51,19 @@ use core::{
 const LOG_TARGET: &str = "emissary::streaming::active";
 
 /// Read buffer size.
-const READ_BUFFER_SIZE: usize = 0xffff;
+const READ_BUFFER_SIZE: usize = 0x7ffff; //0xffff;
 
 /// Initial ACK delay.
-const INITIAL_ACK_DELAY: Duration = Duration::from_millis(200);
+const INITIAL_ACK_DELAY: Duration = Duration::from_millis(20); //200
 
 /// Sequence number for a plain ACK message.
 const PLAIN_ACK: u32 = 0u32;
 
 /// Initial window size.
-const INITIAL_WINDOW_SIZE: usize = 1usize;
+const INITIAL_WINDOW_SIZE: usize = 16usize; //1usize;
 
 /// Maximum window size in packets.
-const MAX_WINDOW_SIZE: usize = 128usize;
+const MAX_WINDOW_SIZE: usize = 256usize; //128usize;
 
 /// How far ahead of the current highest received sequence number is a packet accepted.
 const MAX_WINDOW_LOOKAHEAD: usize = 4 * MAX_WINDOW_SIZE;
@@ -75,10 +75,10 @@ const CHOKING_REQUEST: u16 = 60_001u16;
 const MAX_NACKS: usize = 255usize;
 
 /// Initial RTO.
-const INITIAL_RTO: Duration = Duration::from_millis(9000);
+const INITIAL_RTO: Duration = Duration::from_millis(2000); //9000
 
 /// Initial RTT.
-const INITIAL_RTT: Duration = Duration::from_millis(8000);
+const INITIAL_RTT: Duration = Duration::from_millis(1000); //8000
 
 /// RTT dampening factor (alpha).
 const RTT_DAMPENING_FACTOR: f64 = 0.125f64;
@@ -87,10 +87,10 @@ const RTT_DAMPENING_FACTOR: f64 = 0.125f64;
 const RTTDEV_DAMPENING_FACTOR: f64 = 0.25;
 
 /// Threshold for stopping exponential growth of the window size.
-const EXP_GROWTH_STOP_THRESHOLD: usize = 64;
+const EXP_GROWTH_STOP_THRESHOLD: usize = 128; //64;
 
 /// MTU size.
-const MTU_SIZE: usize = 1812;
+const MTU_SIZE: usize = 8000; //1812;
 
 /// Stream event.
 #[derive(Default, Debug, Clone)]
@@ -792,6 +792,7 @@ impl<R: Runtime> Stream<R> {
                 self.window_size *= 2;
             } else if self.window_size < MAX_WINDOW_SIZE {
                 self.window_size += 1;
+                // self.window_size += 4;
             }
         }
     }

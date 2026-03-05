@@ -227,7 +227,7 @@ impl RouterUi {
                     .iter()
                     .map(|service| {
                         let address = read_b32_address(&service.destination_path)
-                            .map(|address| format!("{address}.b32.i2p"))
+                            .map(|address| format!("{address}.b32.echo"))
                             .unwrap_or(String::from("Key file does not exist"));
 
                         (

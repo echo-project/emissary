@@ -57,6 +57,9 @@ const LOG_TARGET: &str = "emissary::transport-manager";
 /// Local router info gets republished to `NetDb` every 15 minutes.
 const ROUTER_INFO_REPUBLISH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
+/// Default channel size.
+const DEFAULT_CHANNEL_SIZE: usize = 4096; //1024;
+
 /// Termination reason.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum TerminationReason {

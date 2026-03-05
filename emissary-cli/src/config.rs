@@ -215,7 +215,7 @@ impl Default for EmissaryConfig {
             address_book: None,
             // address_book: Some(AddressBookConfig {
             //     default: Some(String::from(
-            //         "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
+            //         "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.echo/hosts.txt",
             //     )),
             //     subscriptions: None,
             // }),

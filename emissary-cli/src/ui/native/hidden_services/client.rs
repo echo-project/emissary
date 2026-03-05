@@ -104,7 +104,7 @@ impl RouterUi {
                 )
                 .push(Text::new("Destination").size(15).color(Color::from_rgb8(0x9b, 0xa2, 0xae)))
                 .push(
-                    TextInput::new(".i2p or .b32.i2p address", &self.client_destination)
+                    TextInput::new(".echo or .b32.echo address", &self.client_destination)
                         .size(15)
                         .on_input(Message::ClientDestinationChanged)
                         .padding(10)
@@ -269,7 +269,7 @@ impl RouterUi {
                 )
                 .push(Text::new("Destination").size(15).color(Color::from_rgb8(0x9b, 0xa2, 0xae)))
                 .push(
-                    TextInput::new(".i2p or .b32.i2p address", &self.edit_client_destination)
+                    TextInput::new(".echo or .b32.echo address", &self.edit_client_destination)
                         .size(15)
                         .on_input(Message::EditClientDestinationChanged)
                         .padding(10)

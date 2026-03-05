@@ -191,6 +191,7 @@ impl<R: Runtime> Ntcp2Session<R> {
             sip,
         } = key_context;
 
+        // let (cmd_tx, cmd_rx) = channel(4096); //channel(512);
         let (msg_tx, msg_rx) = with_recycle(512, OutboundMessageRecycle::default());
 
         Self {
@@ -201,7 +202,7 @@ impl<R: Runtime> Ntcp2Session<R> {
             inbound_bandwidth: 0usize,
             metrics_handle,
             outbound_bandwidth: 0usize,
-            read_buffer: vec![0u8; 0xffff],
+            read_buffer: vec![0u8; 0x7ffff], //vec![0u8; 0xffff],
             read_state: ReadState::ReadSize { offset: 0usize },
             recv_cipher: ChaChaPoly::new(&recv_key),
             role,

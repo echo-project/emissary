@@ -77,7 +77,7 @@ impl RouterUi {
         }
 
         match read_b32_address(&self.server_path) {
-            Some(address) => Ok(format!("{address}.b32.i2p")),
+            Some(address) => Ok(format!("{address}.b32.echo")),
             None => Ok(String::from("Key file does not exist")),
         }
     }
@@ -88,7 +88,7 @@ impl RouterUi {
         }
 
         match read_b32_address(&self.edit_server_path) {
-            Some(address) => Ok(format!("{address}.b32.i2p")),
+            Some(address) => Ok(format!("{address}.b32.echo")),
             None => Ok(String::from("Key file does not exist")),
         }
     }
@@ -102,9 +102,9 @@ impl RouterUi {
             return Err(String::from("Invalid destination port"));
         }
 
-        if !self.client_destination.ends_with(".i2p") {
+        if !self.client_destination.ends_with(".echo") {
             return Err(String::from(
-                "Destination must be a .i2p or .b32.i2p address",
+                "Destination must be a .echo or .b32.echo address",
             ));
         }
 
@@ -120,9 +120,9 @@ impl RouterUi {
             return Err(String::from("Invalid destination port"));
         }
 
-        if !self.edit_client_destination.ends_with(".i2p") {
+        if !self.edit_client_destination.ends_with(".echo") {
             return Err(String::from(
-                "Destination must be a .i2p or .b32.i2p address",
+                "Destination must be a .echo or .b32.echo address",
             ));
         }
 

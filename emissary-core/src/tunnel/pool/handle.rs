@@ -34,6 +34,12 @@ use core::{
     task::{Context, Poll},
 };
 
+/// Channel size for tunnel pool events.
+///
+/// The size of this channel needs to be large because it's shared by all messages routed through
+/// the tunnel pool, including garlic messages and netdb messages.
+const EVENT_CHANNEL_SIZE: usize = 2048usize;
+
 /// Events emitted by a `TunnelPool`.
 #[derive(Default, Debug, Clone)]
 pub enum TunnelPoolEvent {
@@ -267,7 +273,7 @@ impl TunnelPoolHandle {
         message_tx: mpsc::Sender<TunnelMessage, TunnelMessageRecycle>,
     ) -> (Self, mpsc::Sender<TunnelPoolEvent>, oneshot::Receiver<()>) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let (event_tx, event_rx) = mpsc::channel(64);
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
 
         (
             Self {
@@ -315,7 +321,7 @@ impl TunnelPoolHandle {
         oneshot::Receiver<()>,
     ) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let (event_tx, event_rx) = mpsc::channel(64);
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (message_tx, message_rx) = mpsc::with_recycle(64, TunnelMessageRecycle::default());
 
         (
@@ -342,7 +348,7 @@ impl TunnelPoolHandle {
         oneshot::Receiver<()>,
     ) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let (event_tx, event_rx) = mpsc::channel(64);
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (message_tx, message_rx) = mpsc::with_recycle(64, TunnelMessageRecycle::default());
 
         (

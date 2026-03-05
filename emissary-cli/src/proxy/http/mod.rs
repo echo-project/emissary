@@ -108,9 +108,9 @@ impl HttpProxy {
 
         // validate outproxy
         //
-        // if the outproxy is given as a .b32.i2p host, it can be used as-is
+        // if the outproxy is given as a .b32.echo host, it can be used as-is
         //
-        // if it's given as a .i2p host, it must be converted into a .b32.i2p host by doing a host
+        // if it's given as a .echo host, it must be converted into a .b32.echo host by doing a host
         // lookup into address book
         //
         // if either address book is disabled or hostname is not found in it, outproxy is disabled
@@ -120,19 +120,19 @@ impl HttpProxy {
                 let outproxy = outproxy.strip_prefix("http://").unwrap_or(&outproxy);
                 let outproxy = outproxy.strip_prefix("www.").unwrap_or(outproxy);
 
-                match outproxy.ends_with(".i2p") {
+                match outproxy.ends_with(".echo") {
                     false => {
                         tracing::warn!(
                             target: LOG_TARGET,
                             %outproxy,
-                            "outproxy must be .b32.i2p or .i2p hostname",
+                            "outproxy must be .b32.echo or .echo hostname",
                         );
                         None
                     }
-                    true => match (outproxy.ends_with(".b32.i2p"), &address_book_handle) {
+                    true => match (outproxy.ends_with(".b32.echo"), &address_book_handle) {
                         (true, _) => Some(outproxy.to_owned()),
                         (false, Some(handle)) => match handle.resolve_base32(outproxy) {
-                            Some(host) => Some(format!("{host}.b32.i2p")),
+                            Some(host) => Some(format!("{host}.b32.echo")),
                             None => {
                                 tracing::warn!(
                                     target: LOG_TARGET,
@@ -197,8 +197,8 @@ impl HttpProxy {
 
     /// Handle `request`.
     ///
-    /// Assembles the validated request into an actual HTTP request and resolves a .i2p host into a
-    /// .b32.i2p host if a .i2p host was used and if address book was enabled.
+    /// Assembles the validated request into an actual HTTP request and resolves a .echo host into a
+    /// .b32.echo host if a .echo host was used and if address book was enabled.
     ///
     /// If the outbound request was for an outproxy, ensures that an outproxy has been configured.
     ///
@@ -457,7 +457,7 @@ mod tests {
             .expect("to succeed");
 
         match client
-            .get("http://zzz.i2p")
+            .get("http://zzz.echo")
             .headers(HeaderMap::from_iter([(
                 CONNECTION,
                 HeaderValue::from_static("close"),
@@ -472,7 +472,7 @@ mod tests {
                     .text()
                     .await
                     .unwrap()
-                    .contains("Cannot connect to .i2p host, address book not enabled"));
+                    .contains("Cannot connect to .echo host, address book not enabled"));
             }
         };
     }
@@ -526,7 +526,7 @@ mod tests {
             .expect("to succeed");
 
         match client
-            .get("http://zzz.i2p")
+            .get("http://zzz.echo")
             .headers(HeaderMap::from_iter([(
                 CONNECTION,
                 HeaderValue::from_static("close"),
@@ -608,7 +608,7 @@ mod tests {
             HttpProxyConfig {
                 port: 0,
                 host: "127.0.0.1".to_string(),
-                outproxy: Some("outproxy.i2p".to_string()),
+                outproxy: Some("outproxy.echo".to_string()),
             },
             sam_port,
             None,
@@ -677,7 +677,7 @@ mod tests {
             HttpProxyConfig {
                 port: 0,
                 host: "127.0.0.1".to_string(),
-                outproxy: Some("outproxy.i2p".to_string()),
+                outproxy: Some("outproxy.echo".to_string()),
             },
             sam_port,
             None,
@@ -727,10 +727,10 @@ mod tests {
 
         // create empty address book
         let address_book = {
-            let hosts = "psi.i2p=avviiexdngd32ccoy4kuckvc3mkf53ycvzbz6vz75vzhv4tbpk5a\n\
-                    zerobin.i2p=3564erslxzaoucqasxsjerk4jz2xril7j2cbzd4p7flpb4ut67hq\n\
-                    tracker2.postman.i2p=6a4kxkg5wp33p25qqhgwl6sj4yh4xuf5b3p3qldwgclebchm3eea\n\
-                    zzz.i2p=lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua\n"
+            let hosts = "psi.echo=avviiexdngd32ccoy4kuckvc3mkf53ycvzbz6vz75vzhv4tbpk5a\n\
+                    zerobin.echo=3564erslxzaoucqasxsjerk4jz2xril7j2cbzd4p7flpb4ut67hq\n\
+                    tracker2.postman.echo=6a4kxkg5wp33p25qqhgwl6sj4yh4xuf5b3p3qldwgclebchm3eea\n\
+                    zzz.echo=lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua\n"
                 .to_string();
 
             let dir = tempdir().unwrap().keep();
@@ -754,7 +754,7 @@ mod tests {
                 HttpProxyConfig {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    outproxy: Some("zzz.i2p".to_string()),
+                    outproxy: Some("zzz.echo".to_string()),
                 },
                 sam_port,
                 None,
@@ -765,7 +765,7 @@ mod tests {
 
             assert_eq!(
                 proxy.outproxy.as_ref().unwrap().as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
         }
 
@@ -775,7 +775,7 @@ mod tests {
                 HttpProxyConfig {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    outproxy: Some("www.zzz.i2p".to_string()),
+                    outproxy: Some("www.zzz.echo".to_string()),
                 },
                 sam_port,
                 None,
@@ -786,7 +786,7 @@ mod tests {
 
             assert_eq!(
                 proxy.outproxy.as_ref().unwrap().as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
         }
 
@@ -796,7 +796,7 @@ mod tests {
                 HttpProxyConfig {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    outproxy: Some("http://zzz.i2p".to_string()),
+                    outproxy: Some("http://zzz.echo".to_string()),
                 },
                 sam_port,
                 None,
@@ -807,7 +807,7 @@ mod tests {
 
             assert_eq!(
                 proxy.outproxy.as_ref().unwrap().as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
         }
 
@@ -817,7 +817,7 @@ mod tests {
                 HttpProxyConfig {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    outproxy: Some("http://www.zzz.i2p".to_string()),
+                    outproxy: Some("http://www.zzz.echo".to_string()),
                 },
                 sam_port,
                 None,
@@ -828,18 +828,18 @@ mod tests {
 
             assert_eq!(
                 proxy.outproxy.as_ref().unwrap().as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
         }
 
-        // http://www. .b32.i2p host
+        // http://www. .b32.echo host
         {
             let proxy = HttpProxy::new(
                 HttpProxyConfig {
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     outproxy: Some(
-                        "http://www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                        "http://www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
                             .to_string(),
                     ),
                 },
@@ -852,18 +852,18 @@ mod tests {
 
             assert_eq!(
                 proxy.outproxy.as_ref().unwrap().as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
         }
 
-        // http:// .b32.i2p host
+        // http:// .b32.echo host
         {
             let proxy = HttpProxy::new(
                 HttpProxyConfig {
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     outproxy: Some(
-                        "http://lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                        "http://lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
                             .to_string(),
                     ),
                 },
@@ -876,18 +876,18 @@ mod tests {
 
             assert_eq!(
                 proxy.outproxy.as_ref().unwrap().as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
         }
 
-        // http:// .b32.i2p host
+        // http:// .b32.echo host
         {
             let proxy = HttpProxy::new(
                 HttpProxyConfig {
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     outproxy: Some(
-                        "www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                        "www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
                             .to_string(),
                     ),
                 },
@@ -900,18 +900,18 @@ mod tests {
 
             assert_eq!(
                 proxy.outproxy.as_ref().unwrap().as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
         }
 
-        // .b32.i2p host
+        // .b32.echo host
         {
             let proxy = HttpProxy::new(
                 HttpProxyConfig {
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     outproxy: Some(
-                        "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string(),
+                        "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string(),
                     ),
                 },
                 sam_port,
@@ -923,7 +923,7 @@ mod tests {
 
             assert_eq!(
                 proxy.outproxy.as_ref().unwrap().as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
         }
     }

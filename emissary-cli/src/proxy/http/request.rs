@@ -40,7 +40,7 @@ static ILLEGAL: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 /// Host kind.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostKind {
-    /// .i2p host.
+    /// .echo host.
     ///
     /// Address book must've been enabled and the host must exist in address book.
     I2p {
@@ -48,7 +48,7 @@ pub enum HostKind {
         host: String,
     },
 
-    /// .b32.i2p host
+    /// .b32.echo host
     B32 {
         /// Host.
         host: String,
@@ -87,7 +87,7 @@ impl Request {
     /// be made to the request remote host.
     ///
     /// If the parsed is [`HostKind::Clearnet`], an outproxy must have been configured and if the
-    /// parsed host is [`HostKind::I2p`], address book must have been enabled and the .i2p host must
+    /// parsed host is [`HostKind::I2p`], address book must have been enabled and the .echo host must
     /// be found int the address book.
     pub fn parse(request: Vec<u8>) -> Result<Self, HttpError> {
         // parse request and create a new request with sanitized headers
@@ -131,9 +131,9 @@ impl Request {
                 let host = std::str::from_utf8(host.value).map_err(|_| HttpError::Malformed)?;
                 let host = host.strip_prefix("www.").unwrap_or(host).to_string();
 
-                match host.ends_with(".i2p") {
+                match host.ends_with(".echo") {
                     false => HostKind::Clearnet { host },
-                    true => match host.ends_with(".b32.i2p") {
+                    true => match host.ends_with(".b32.echo") {
                         false => HostKind::I2p { host },
                         true => HostKind::B32 { host },
                     },
@@ -151,17 +151,17 @@ impl Request {
 
     /// Attempt to assemble [`Request`] into a serialized request that can be sent to remote host.
     ///
-    /// Takes two parameters: `address_book` and `outproxy`. `address_book` is used to resolve .i2p
-    /// host into a .b32.i2p host, if host is [`HostKind::I2p`]. If `address_book` doesn't exist or
-    /// the .i2p host was not found in the address book, an error is returned to indicate that the
-    /// request could not be assmebled. `outproxy` is the .b32.i2p host of the outproxy, if
+    /// Takes two parameters: `address_book` and `outproxy`. `address_book` is used to resolve .echo
+    /// host into a .b32.echo host, if host is [`HostKind::I2p`]. If `address_book` doesn't exist or
+    /// the .echo host was not found in the address book, an error is returned to indicate that the
+    /// request could not be assmebled. `outproxy` is the .b32.echo host of the outproxy, if
     /// configured, and it must exist if host is [`HostKind::Clearnet`].
     ///
     /// The function constructs a new HTTP request, setting the correct user agent and stripping any
     /// "illegal" headers before returning it to the caller, allowing them to send it to remote
     /// host.
     ///
-    /// Returns a `(host, request)` tuple where the `host` is the .b32.i2p address of the remote
+    /// Returns a `(host, request)` tuple where the `host` is the .b32.echo address of the remote
     /// host SAM should connect to (either an eepsite or an outproxy) and where `request` is a
     /// serialized HTTP request.
     pub async fn assemble(
@@ -177,23 +177,23 @@ impl Request {
 
         // resolve host for the request
         //
-        // .b32.i2p: no modifications needed
-        // .i2p:     attempt to resolve .i2p host to .b32.i2p host
-        // clearnet: ensure outproxy has been configured and return its .b32.i2p hostname
+        // .b32.echo: no modifications needed
+        // .echo:     attempt to resolve .echo host to .b32.echo host
+        // clearnet: ensure outproxy has been configured and return its .b32.echo hostname
         //
         // if a clearnet address is used and an outproxy has been enabled, the host that is the
         // original request must be kept unmodified as the request is sent to clearnet and such
-        // an address obviously doesn't need to (and cannot be) resolved to a .b32.i2p hostname
+        // an address obviously doesn't need to (and cannot be) resolved to a .b32.echo hostname
         let (host, keep_original_host) = match (self.host, address_book, outproxy) {
             (HostKind::B32 { host }, _, _) => (host, false),
             (HostKind::I2p { host }, Some(address_book), _) =>
                 match address_book.resolve_base32(&host) {
-                    Some(host) => (format!("{host}.b32.i2p"), false),
+                    Some(host) => (format!("{host}.b32.echo"), false),
                     None => {
                         tracing::warn!(
                             target: LOG_TARGET,
                             %host,
-                            ".i2p host not found in the address book",
+                            ".echo host not found in the address book",
                         );
                         return Err(HttpError::HostNotFound);
                     }
@@ -203,7 +203,7 @@ impl Request {
                 tracing::warn!(
                     target: LOG_TARGET,
                     %host,
-                    "cannot connect to .i2p host, address book not enabled"
+                    "cannot connect to .echo host, address book not enabled"
                 );
                 return Err(HttpError::AddressBookNotEnabled);
             }
@@ -240,7 +240,7 @@ impl Request {
 
             // modify host if not explicitly forbidden
             //
-            // the host must be modified for .i2p requests as otherwise the request would leak
+            // the host must be modified for .echo requests as otherwise the request would leak
             // information about local addressbook
             //
             // the host must be kept unmodified for clearnet requests going through an outproxy
@@ -317,10 +317,10 @@ mod tests {
     use tempfile::tempdir;
 
     async fn make_address_book() -> (Arc<dyn AddressBook>, PathBuf) {
-        let hosts = "psi.i2p=avviiexdngd32ccoy4kuckvc3mkf53ycvzbz6vz75vzhv4tbpk5a\n\
-                    zerobin.i2p=3564erslxzaoucqasxsjerk4jz2xril7j2cbzd4p7flpb4ut67hq\n\
-                    tracker2.postman.i2p=6a4kxkg5wp33p25qqhgwl6sj4yh4xuf5b3p3qldwgclebchm3eea\n\
-                    zzz.i2p=lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua\n"
+        let hosts = "psi.echo=avviiexdngd32ccoy4kuckvc3mkf53ycvzbz6vz75vzhv4tbpk5a\n\
+                    zerobin.echo=3564erslxzaoucqasxsjerk4jz2xril7j2cbzd4p7flpb4ut67hq\n\
+                    tracker2.postman.echo=6a4kxkg5wp33p25qqhgwl6sj4yh4xuf5b3p3qldwgclebchm3eea\n\
+                    zzz.echo=lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua\n"
             .to_string();
 
         let dir = tempdir().unwrap().keep();
@@ -342,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn get_accepted() {
         let request = "GET / HTTP/1.1\r\n\
-                    Host: lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p\r\n\r\n"
+                    Host: lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo\r\n\r\n"
             .as_bytes()
             .to_vec();
 
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(
             host,
             HostKind::B32 {
-                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()
+                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()
             }
         );
         assert_eq!(method, "GET".to_string());
@@ -368,14 +368,14 @@ mod tests {
 
         assert_eq!(
             req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
         );
     }
 
     #[tokio::test]
     async fn get_full_path() {
-        let request = "GET http://www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p HTTP/1.1\r\n\
-                            Host: www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p\r\n\r\n"
+        let request = "GET http://www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo HTTP/1.1\r\n\
+                            Host: www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo\r\n\r\n"
             .as_bytes()
             .to_vec();
         let request = Request::parse(request).unwrap();
@@ -383,7 +383,7 @@ mod tests {
         assert_eq!(
             request.host,
             HostKind::B32 {
-                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()
+                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()
             }
         );
         assert_eq!(request.method, "GET".to_string());
@@ -398,18 +398,18 @@ mod tests {
 
         assert_eq!(
             req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
         );
         assert_eq!(
             host.as_str(),
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p",
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo",
         );
     }
 
     #[tokio::test]
     async fn www_stripped_from_host() {
         let request = "GET / HTTP/1.1\r\nHost: \
-                        www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p\r\n\r\n"
+                        www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo\r\n\r\n"
             .as_bytes()
             .to_vec();
         let request = Request::parse(request).unwrap();
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(
             request.host,
             HostKind::B32 {
-                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()
+                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()
             }
         );
         assert_eq!(request.method, "GET".to_string());
@@ -432,24 +432,24 @@ mod tests {
         assert_eq!(req.path, Some("/"));
         assert_eq!(
             host.as_str(),
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p",
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo",
         );
         assert_eq!(
             req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
         );
     }
 
     #[tokio::test]
     async fn converted_to_relative_path() {
-        let request = "GET http://www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p/topics/new-topic?query=1 \
-                        HTTP/1.1\r\nHost: www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p\r\n\r\n".as_bytes().to_vec();
+        let request = "GET http://www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo/topics/new-topic?query=1 \
+                        HTTP/1.1\r\nHost: www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo\r\n\r\n".as_bytes().to_vec();
         let request = Request::parse(request).unwrap();
 
         assert_eq!(
             request.host,
             HostKind::B32 {
-                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()
+                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()
             }
         );
         assert_eq!(request.method, "GET".to_string());
@@ -464,18 +464,18 @@ mod tests {
         assert_eq!(req.path, Some("/topics/new-topic?query=1"));
         assert_eq!(
             host.as_str(),
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p",
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo",
         );
         assert_eq!(
             req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
         );
     }
 
     #[tokio::test]
     async fn post_accepted() {
         let request = "POST /upload HTTP/1.1\r\n\
-                        Host: www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p\r\n\
+                        Host: www.lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo\r\n\
                         Content-Type: text/plain\r\n\
                         Content-Length: 12\r\n\r\n\
                         hello, world"
@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(
             request.host,
             HostKind::B32 {
-                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()
+                host: "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()
             }
         );
         assert_eq!(request.method, "POST".to_string());
@@ -505,11 +505,11 @@ mod tests {
         );
         assert_eq!(
             req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
         );
         assert_eq!(
             host.as_str(),
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p",
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo",
         );
         assert_eq!(
             req.headers.iter().find(|header| header.name == "Content-Length").unwrap().value,
@@ -526,13 +526,13 @@ mod tests {
 
     #[tokio::test]
     async fn i2p_host_address_book_disabled() {
-        let request = "GET / HTTP/1.1\r\nHost: host.i2p\r\n\r\n".as_bytes().to_vec();
+        let request = "GET / HTTP/1.1\r\nHost: host.echo\r\n\r\n".as_bytes().to_vec();
         let request = Request::parse(request).unwrap();
 
         assert_eq!(
             request.host,
             HostKind::I2p {
-                host: "host.i2p".to_string()
+                host: "host.echo".to_string()
             }
         );
         assert_eq!(request.method, "GET".to_string());
@@ -546,13 +546,13 @@ mod tests {
     #[tokio::test]
     async fn i2p_host_not_found_in_address_book() {
         let address_book = make_address_book().await.0;
-        let request = "GET / HTTP/1.1\r\nHost: host.i2p\r\n\r\n".as_bytes().to_vec();
+        let request = "GET / HTTP/1.1\r\nHost: host.echo\r\n\r\n".as_bytes().to_vec();
         let request = Request::parse(request).unwrap();
 
         assert_eq!(
             request.host,
             HostKind::I2p {
-                host: "host.i2p".to_string()
+                host: "host.echo".to_string()
             }
         );
         assert_eq!(request.method, "GET".to_string());
@@ -566,13 +566,13 @@ mod tests {
     #[tokio::test]
     async fn i2p_host_found_in_address_book() {
         let address_book = make_address_book().await.0;
-        let request = "GET / HTTP/1.1\r\nHost: zzz.i2p\r\n\r\n".as_bytes().to_vec();
+        let request = "GET / HTTP/1.1\r\nHost: zzz.echo\r\n\r\n".as_bytes().to_vec();
         let request = Request::parse(request).unwrap();
 
         assert_eq!(
             request.host,
             HostKind::I2p {
-                host: "zzz.i2p".to_string()
+                host: "zzz.echo".to_string()
             }
         );
         assert_eq!(request.method, "GET".to_string());
@@ -581,7 +581,7 @@ mod tests {
         let (host, request) = request.assemble(&Some(address_book), &None).await.unwrap();
         assert_eq!(
             host.as_str(),
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
         );
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -592,14 +592,14 @@ mod tests {
         assert_eq!(req.path, Some("/"));
         assert_eq!(
             req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
         );
     }
 
     #[tokio::test]
     async fn converted_to_relative_path_host_lookup() {
         let address_book = make_address_book().await.0;
-        let request = "GET http://www.zzz.i2p.b32.i2p/topics/new-topic?query=1 HTTP/1.1\r\nHost: www.zzz.i2p\r\n\r\n"
+        let request = "GET http://www.zzz.echo.b32.echo/topics/new-topic?query=1 HTTP/1.1\r\nHost: www.zzz.echo\r\n\r\n"
             .as_bytes()
             .to_vec();
         let request = Request::parse(request).unwrap();
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(
             request.host,
             HostKind::I2p {
-                host: "zzz.i2p".to_string()
+                host: "zzz.echo".to_string()
             }
         );
         assert_eq!(request.method, "GET".to_string());
@@ -616,7 +616,7 @@ mod tests {
         let (host, request) = request.assemble(&Some(address_book), &None).await.unwrap();
         assert_eq!(
             host.as_str(),
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
         );
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(req.path, Some("/topics/new-topic?query=1"));
         assert_eq!(
             req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
         );
     }
 
@@ -637,13 +637,13 @@ mod tests {
 
         // first query which does a lookup to disk
         {
-            let request = "GET / HTTP/1.1\r\nHost: zzz.i2p\r\n\r\n".as_bytes().to_vec();
+            let request = "GET / HTTP/1.1\r\nHost: zzz.echo\r\n\r\n".as_bytes().to_vec();
             let request = Request::parse(request).unwrap();
 
             assert_eq!(
                 request.host,
                 HostKind::I2p {
-                    host: "zzz.i2p".to_string()
+                    host: "zzz.echo".to_string()
                 }
             );
             assert_eq!(request.method, "GET".to_string());
@@ -653,7 +653,7 @@ mod tests {
                 request.assemble(&Some(address_book.clone()), &None).await.unwrap();
             assert_eq!(
                 host.as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
 
             let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -664,22 +664,22 @@ mod tests {
             assert_eq!(req.path, Some("/"));
             assert_eq!(
                 req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
             );
         }
 
         // remove address book file
         tokio::fs::remove_file(path).await.unwrap();
 
-        // address book is removed from disk but zzz.i2p has been cached
+        // address book is removed from disk but zzz.echo has been cached
         {
-            let request = "GET / HTTP/1.1\r\nHost: zzz.i2p\r\n\r\n".as_bytes().to_vec();
+            let request = "GET / HTTP/1.1\r\nHost: zzz.echo\r\n\r\n".as_bytes().to_vec();
             let request = Request::parse(request).unwrap();
 
             assert_eq!(
                 request.host,
                 HostKind::I2p {
-                    host: "zzz.i2p".to_string()
+                    host: "zzz.echo".to_string()
                 }
             );
             assert_eq!(request.method, "GET".to_string());
@@ -688,7 +688,7 @@ mod tests {
             let (host, request) = request.assemble(&Some(address_book), &None).await.unwrap();
             assert_eq!(
                 host.as_str(),
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p"
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo"
             );
 
             let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -699,7 +699,7 @@ mod tests {
             assert_eq!(req.path, Some("/"));
             assert_eq!(
                 req.headers.iter().find(|header| header.name == "Host").unwrap().value,
-                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".as_bytes(),
+                "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".as_bytes(),
             );
         }
     }
@@ -741,14 +741,14 @@ mod tests {
         let (host, request) = request
             .assemble(
                 &None,
-                &Some("lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()),
+                &Some("lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()),
             )
             .await
             .unwrap();
 
         assert_eq!(
             host,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()
         );
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -786,14 +786,14 @@ mod tests {
         let (host, request) = request
             .assemble(
                 &None,
-                &Some("lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()),
+                &Some("lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()),
             )
             .await
             .unwrap();
 
         assert_eq!(
             host,
-            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.i2p".to_string()
+            "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua.b32.echo".to_string()
         );
 
         let mut headers = [httparse::EMPTY_HEADER; 64];

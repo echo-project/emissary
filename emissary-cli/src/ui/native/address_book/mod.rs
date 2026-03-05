@@ -105,8 +105,8 @@ impl RouterUi {
     }
 
     pub fn save_destination(&mut self) -> Result<(), String> {
-        if !self.hostname.ends_with(".i2p") {
-            return Err(String::from("Hostname must end in .i2p"));
+        if !self.hostname.ends_with(".echo") {
+            return Err(String::from("Hostname must end in .echo"));
         }
 
         if self.destination.is_empty() {
@@ -117,7 +117,7 @@ impl RouterUi {
         let destination = destination.strip_prefix("http://").unwrap_or(destination);
         let destination = destination.strip_prefix("https://").unwrap_or(destination);
         let destination = destination.strip_prefix("www.").unwrap_or(destination);
-        let destination = destination.strip_suffix(".b32.i2p").unwrap_or(destination);
+        let destination = destination.strip_suffix(".b32.echo").unwrap_or(destination);
 
         match emissary_core::crypto::base64_decode(destination) {
             Some(destination) => match Destination::parse(&destination) {
@@ -159,10 +159,10 @@ impl RouterUi {
         let subscriptions =
             self.subscriptions.split(",").map(ToOwned::to_owned).collect::<Vec<String>>();
 
-        if !subscriptions.iter().all(|url| url.ends_with(".i2p/hosts.txt")) {
+        if !subscriptions.iter().all(|url| url.ends_with(".echo/hosts.txt")) {
             return Err(String::from(
                 "All URLs are not valid I2P subscription URLs\n\n\
-                Example: http://host1.i2p/hosts.txt,http://host2.i2p/hosts.txt",
+                Example: http://host1.echo/hosts.txt,http://host2.echo/hosts.txt",
             ));
         }
 

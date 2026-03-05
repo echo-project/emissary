@@ -26,6 +26,7 @@ thiserror = "2.0.12"
 tokio-tungstenite = { version = "0.27.0", default-features = false, features = ["native-tls"], optional = true }
 url = "2.5.4"
 base64 = "0.21"
+num_cpus = "1.16"
 
 # workspace dependencies
 anyhow = { workspace = true }

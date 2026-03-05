@@ -173,6 +173,8 @@ impl ServerTunnelManager {
             destination: DestinationKind::Persistent {
                 private_key: config.destination.clone(),
             },
+            inbound_len: 1, //ToDo: make this configurable   //current value test purpose
+            outbound_len: 1, //ToDo: make this configurable   //current value test purpose
             ..Default::default()
         })
         .await

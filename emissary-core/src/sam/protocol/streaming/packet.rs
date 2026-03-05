@@ -52,7 +52,7 @@ const SIGNATURE_LEN: usize = 64usize;
 const DSA_SIGNATURE_LEN: usize = 40usize;
 
 /// MTU size.
-const MTU: usize = 1812usize;
+const MTU: usize = 8000usize; //1812usize;
 
 /// Flags of the streaming packet.
 pub struct Flags<'a> {

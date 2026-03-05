@@ -1533,6 +1533,7 @@ dependencies = [
  "futures",
  "httparse",
  "iced",
+ "num_cpus",
  "parking_lot 0.12.4",
  "plotters",
  "plotters-iced",

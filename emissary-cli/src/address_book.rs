@@ -286,8 +286,8 @@ impl AddressBookManager {
             }
         }
 
-        // save hosts to disk at this point as subscriptions might contain .i2p addresses
-        // which the http proxy must be able to resolve to .b32.i2p addresses
+        // save hosts to disk at this point as subscriptions might contain .echo addresses
+        // which the http proxy must be able to resolve to .b32.echo addresses
         self.save_to_disk(addresses.clone()).await;
 
         for subscription in &self.subscriptions {
@@ -313,7 +313,7 @@ impl AddressBookManager {
 
     /// Save `addresses` to disk.
     ///
-    /// Parses each destination in `addresses` into its .b32.i2p address, stores all .b32.i2p
+    /// Parses each destination in `addresses` into its .b32.echo address, stores all .b32.echo
     /// addresses along with their hostnames into a file and stores all .Base64-encoded destinations
     /// into a separate directory where each destination is indexed by their hostname.
     async fn save_to_disk(&self, addresses: HashMap<String, (String, String)>) {
@@ -525,7 +525,7 @@ mod tests {
         .await;
 
         let mut addresses = HashMap::<String, (String, String)>::new();
-        let hosts = "tracker2.postman.i2p=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
+        let hosts = "tracker2.postman.echo=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
                 J50lUZgVPhjlI19TgJ-CxyHhHSCeKx5JzURdEW-ucdONMynr-b2zwhsx8VQCJwCEkARvt21YkOyQDaB9IdV8aTAmP~PUJQxRwceaTMn96FcVenwdXqle\
                 E16fI8CVFOV18jbJKrhTOYpTtcZKV4l1wNYBDwKgwPx5c0kcrRzFyw5~bjuAKO~GJ5dR7BQsL7AwBoQUS4k1lwoYrG1kOIBeDD3XF8BWb6K3GOOoyjc1\
                 umYKpur3G~FxBuqtHAsDRICrsRuil8qK~whOvj8uNTv~ohZnTZHxTLgi~sDyo98BwJ-4Y4NMSuF4GLzcgLypcR1D1WY2tDqMKRYFVyLE~MTPVjRRgXfc\
@@ -540,12 +540,12 @@ mod tests {
                 PUlGlh9yIfBY40CQ0Ermy8gzjHLayUpypDJFv2V6rHLwxAQeaXJu8YXbyvCucEu9i6HVO49akXW9YSxcZEqxK04wZnjBqhHGlVbehleMqTx9nkd0pUpB\
                 Zz~vIaG9matUSHinopEo6Wegml9FEz~FEaQpPknKuMAGGSNFVJb0NtaOQSAocAOg1nLKh80v232Y8sJOHG63asSJoBa6bGwjIHftsqD~lEmVV4NkgNPy\
                 bmvsD1SCbMQ2ExaCXFPVQV-yJhIAPN9MRVT9cSBT2GCq-vpMwdJ5Nf0iPR3M-Ak961JUwWXPYTL79toXCgxDX2~nZ5QFRV490YNnfB7LQu10G89wG8lz\
-                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.i2p=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
+                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.echo=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
                 DZRuaToRlXIFW4k5J1ccTzGzMxR518BkCAE3jCFIyrbF0MjQDuXO5cwmqfBFWrIv72xgKDizu3HytE4vOF2M730rv8epSNPAJg6OpyXkf5UQW96kgL8S\
                 WcxWdTbKU-O8IpE3O01Oc6j0fp1E4wVOci7qIL8UEloNN~mulgka69MkR0uEtXWOXd6wvBjLNrZgdZi7XtT4QlDjx13jr7RGpZBJAUkk~8gLqgJwoUYh\
                 bfM7x564PIn3IlMXHK5AKRVxAbCQ5GkS8KdkvNL7FsQ~EiElGzZId4wenraHMHL0destUDmuwGdHKA7YdtovXD~OnaBvIbl36iuIduZnGKPEBD31hVLd\
                 JuVId9RND7lQy5BZJHQss5HSxMWTszAnWJDwmxqzMHHCiL6BMpZnkz8znwPDSkUwEs3P6-ba7mDKKt8EPCG0nM6l~BvPl2OKQIBhXIxJLOOavGyqmmYm\
-                AAAA\nzzz.i2p=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
+                AAAA\nzzz.echo=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
                 Xl51cJn9MVTRrEqRWSJVXbUUz9t5Po6Xa247Vr0sJn27R4KoKP8QVj1GuH6dB3b6wTPbOamC3dkO18vkQkfZWUdRMDXk0d8AdjB0E0864nOT~J9Fpnd2\
                 pQE5uoFT6P0DqtQR2jsFvf9ME61aqLvKPPWpkgdn4z6Zkm-NJOcDz2Nv8Si7hli94E9SghMYRsdjU-knObKvxiagn84FIwcOpepxuG~kFXdD5NfsH0v6\
                 Uri3usE3XWD7Pw6P8qVYF39jUIq4OiNMwPnNYzy2N4mDMQdsdHO3LUVh~DEppOy9AAmEoHDjjJxt2BFBbGxfdpZCpENkwvmZeYUyNCCzASqTOOlNzdpn\
@@ -558,7 +558,7 @@ mod tests {
             .collect::<HashMap<_, _>>();
 
         assert_eq!(
-            addresses.get(&String::from("tracker2.postman.i2p")),
+            addresses.get(&String::from("tracker2.postman.echo")),
             Some(&String::from(
                     "lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDaJ50lUZg\
                     VPhjlI19TgJ-CxyHhHSCeKx5JzURdEW-ucdONMynr-b2zwhsx8VQCJwCEkARvt21YkOyQDaB9IdV8aTAmP~PUJQxRwceaT\
@@ -571,7 +571,7 @@ mod tests {
         );
 
         assert_eq!(
-            addresses.get(&String::from("psi.i2p")),
+            addresses.get(&String::from("psi.echo")),
             Some(
                 &String::from(
                     "a11l91etedRW5Kl2GhdDI9qiRBbDRAQY6TWJb8KlSc0P9WUrEviABAAltqDU1DFJrRhMAZg5i6rWGszkJrF-pWLQK9JOH3\
@@ -585,7 +585,7 @@ mod tests {
         );
 
         assert_eq!(
-            addresses.get(&String::from("zerobin.i2p")),
+            addresses.get(&String::from("zerobin.echo")),
             Some(
                 &String::from(
                     "Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVgDZRuaToRlXIFW4k5J1ccTzGzMxR518BkCAE3jCFIyrbF0Mj\
@@ -599,7 +599,7 @@ mod tests {
         );
 
         assert_eq!(
-            addresses.get(&String::from("zzz.i2p")),
+            addresses.get(&String::from("zzz.echo")),
             Some(
                 &String::from(
                     "GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~\
@@ -630,7 +630,7 @@ mod tests {
             .await;
 
             let mut addresses = HashMap::<String, (String, String)>::new();
-            let hosts = "tracker2.postman.i2p=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
+            let hosts = "tracker2.postman.echo=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
                 J50lUZgVPhjlI19TgJ-CxyHhHSCeKx5JzURdEW-ucdONMynr-b2zwhsx8VQCJwCEkARvt21YkOyQDaB9IdV8aTAmP~PUJQxRwceaTMn96FcVenwdXqle\
                 E16fI8CVFOV18jbJKrhTOYpTtcZKV4l1wNYBDwKgwPx5c0kcrRzFyw5~bjuAKO~GJ5dR7BQsL7AwBoQUS4k1lwoYrG1kOIBeDD3XF8BWb6K3GOOoyjc1\
                 umYKpur3G~FxBuqtHAsDRICrsRuil8qK~whOvj8uNTv~ohZnTZHxTLgi~sDyo98BwJ-4Y4NMSuF4GLzcgLypcR1D1WY2tDqMKRYFVyLE~MTPVjRRgXfc\
@@ -645,12 +645,12 @@ mod tests {
                 PUlGlh9yIfBY40CQ0Ermy8gzjHLayUpypDJFv2V6rHLwxAQeaXJu8YXbyvCucEu9i6HVO49akXW9YSxcZEqxK04wZnjBqhHGlVbehleMqTx9nkd0pUpB\
                 Zz~vIaG9matUSHinopEo6Wegml9FEz~FEaQpPknKuMAGGSNFVJb0NtaOQSAocAOg1nLKh80v232Y8sJOHG63asSJoBa6bGwjIHftsqD~lEmVV4NkgNPy\
                 bmvsD1SCbMQ2ExaCXFPVQV-yJhIAPN9MRVT9cSBT2GCq-vpMwdJ5Nf0iPR3M-Ak961JUwWXPYTL79toXCgxDX2~nZ5QFRV490YNnfB7LQu10G89wG8lz\
-                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.i2p=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
+                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.echo=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
                 DZRuaToRlXIFW4k5J1ccTzGzMxR518BkCAE3jCFIyrbF0MjQDuXO5cwmqfBFWrIv72xgKDizu3HytE4vOF2M730rv8epSNPAJg6OpyXkf5UQW96kgL8S\
                 WcxWdTbKU-O8IpE3O01Oc6j0fp1E4wVOci7qIL8UEloNN~mulgka69MkR0uEtXWOXd6wvBjLNrZgdZi7XtT4QlDjx13jr7RGpZBJAUkk~8gLqgJwoUYh\
                 bfM7x564PIn3IlMXHK5AKRVxAbCQ5GkS8KdkvNL7FsQ~EiElGzZId4wenraHMHL0destUDmuwGdHKA7YdtovXD~OnaBvIbl36iuIduZnGKPEBD31hVLd\
                 JuVId9RND7lQy5BZJHQss5HSxMWTszAnWJDwmxqzMHHCiL6BMpZnkz8znwPDSkUwEs3P6-ba7mDKKt8EPCG0nM6l~BvPl2OKQIBhXIxJLOOavGyqmmYm\
-                AAAA\nzzz.i2p=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
+                AAAA\nzzz.echo=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
                 Xl51cJn9MVTRrEqRWSJVXbUUz9t5Po6Xa247Vr0sJn27R4KoKP8QVj1GuH6dB3b6wTPbOamC3dkO18vkQkfZWUdRMDXk0d8AdjB0E0864nOT~J9Fpnd2\
                 pQE5uoFT6P0DqtQR2jsFvf9ME61aqLvKPPWpkgdn4z6Zkm-NJOcDz2Nv8Si7hli94E9SghMYRsdjU-knObKvxiagn84FIwcOpepxuG~kFXdD5NfsH0v6\
                 Uri3usE3XWD7Pw6P8qVYF39jUIq4OiNMwPnNYzy2N4mDMQdsdHO3LUVh~DEppOy9AAmEoHDjjJxt2BFBbGxfdpZCpENkwvmZeYUyNCCzASqTOOlNzdpn\
@@ -674,21 +674,21 @@ mod tests {
         let handle = address_book.handle();
 
         // try to find base32 address and base64-encoded destination of a saved destination
-        let host = handle.resolve_base32("zzz.i2p").expect("to find base32 address for zzz.i2p");
+        let host = handle.resolve_base32("zzz.echo").expect("to find base32 address for zzz.echo");
         assert_eq!(
             host,
             "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua".to_string()
         );
 
         let destination = handle
-            .resolve_base64("zzz.i2p".to_string())
+            .resolve_base64("zzz.echo".to_string())
             .await
-            .expect("expected to find destination for zzz.i2p");
+            .expect("expected to find destination for zzz.echo");
         assert_eq!(destination, "GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dmXl51cJn9MVTRrEqRWSJVXbUUz9t5Po6Xa247Vr0sJn27R4KoKP8QVj1GuH6dB3b6wTPbOamC3dkO18vkQkfZWUdRMDXk0d8AdjB0E0864nOT~J9Fpnd2pQE5uoFT6P0DqtQR2jsFvf9ME61aqLvKPPWpkgdn4z6Zkm-NJOcDz2Nv8Si7hli94E9SghMYRsdjU-knObKvxiagn84FIwcOpepxuG~kFXdD5NfsH0v6Uri3usE3XWD7Pw6P8qVYF39jUIq4OiNMwPnNYzy2N4mDMQdsdHO3LUVh~DEppOy9AAmEoHDjjJxt2BFBbGxfdpZCpENkwvmZeYUyNCCzASqTOOlNzdpne8cuesn3NDXIpNnqEE6Oe5Qm5YOJykrX~Vx~cFFT3QzDGkIjjxlFBsjUJyYkFjBQAEAAcAAA==");
 
         // attempt to find base32 address for an unknown hostname
-        assert!(handle.resolve_base32("test.i2p").is_none());
-        assert!(handle.resolve_base64("test.i2p".to_string()).await.is_none());
+        assert!(handle.resolve_base32("test.echo").is_none());
+        assert!(handle.resolve_base64("test.echo".to_string()).await.is_none());
     }
 
     #[tokio::test]
@@ -706,7 +706,7 @@ mod tests {
         .await;
 
         let mut addresses = HashMap::<String, (String, String)>::new();
-        let hosts = "tracker2.postman.i2p=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
+        let hosts = "tracker2.postman.echo=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
                 J50lUZgVPhjlI19TgJ-CxyHhHSCeKx5JzURdEW-ucdONMynr-b2zwhsx8VQCJwCEkARvt21YkOyQDaB9IdV8aTAmP~PUJQxRwceaTMn96FcVenwdXqle\
                 E16fI8CVFOV18jbJKrhTOYpTtcZKV4l1wNYBDwKgwPx5c0kcrRzFyw5~bjuAKO~GJ5dR7BQsL7AwBoQUS4k1lwoYrG1kOIBeDD3XF8BWb6K3GOOoyjc1\
                 umYKpur3G~FxBuqtHAsDRICrsRuil8qK~whOvj8uNTv~ohZnTZHxTLgi~sDyo98BwJ-4Y4NMSuF4GLzcgLypcR1D1WY2tDqMKRYFVyLE~MTPVjRRgXfc\
@@ -721,12 +721,12 @@ mod tests {
                 PUlGlh9yIfBY40CQ0Ermy8gzjHLayUpypDJFv2V6rHLwxAQeaXJu8YXbyvCucEu9i6HVO49akXW9YSxcZEqxK04wZnjBqhHGlVbehleMqTx9nkd0pUpB\
                 Zz~vIaG9matUSHinopEo6Wegml9FEz~FEaQpPknKuMAGGSNFVJb0NtaOQSAocAOg1nLKh80v232Y8sJOHG63asSJoBa6bGwjIHftsqD~lEmVV4NkgNPy\
                 bmvsD1SCbMQ2ExaCXFPVQV-yJhIAPN9MRVT9cSBT2GCq-vpMwdJ5Nf0iPR3M-Ak961JUwWXPYTL79toXCgxDX2~nZ5QFRV490YNnfB7LQu10G89wG8lz\
-                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.i2p=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
+                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.echo=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
                 DZRuaToRlXIFW4k5J1ccTzGzMxR518BkCAE3jCFIyrbF0MjQDuXO5cwmqfBFWrIv72xgKDizu3HytE4vOF2M730rv8epSNPAJg6OpyXkf5UQW96kgL8S\
                 WcxWdTbKU-O8IpE3O01Oc6j0fp1E4wVOci7qIL8UEloNN~mulgka69MkR0uEtXWOXd6wvBjLNrZgdZi7XtT4QlDjx13jr7RGpZBJAUkk~8gLqgJwoUYh\
                 bfM7x564PIn3IlMXHK5AKRVxAbCQ5GkS8KdkvNL7FsQ~EiElGzZId4wenraHMHL0destUDmuwGdHKA7YdtovXD~OnaBvIbl36iuIduZnGKPEBD31hVLd\
                 JuVId9RND7lQy5BZJHQss5HSxMWTszAnWJDwmxqzMHHCiL6BMpZnkz8znwPDSkUwEs3P6-ba7mDKKt8EPCG0nM6l~BvPl2OKQIBhXIxJLOOavGyqmmYm\
-                AAAA\nzzz.i2p=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
+                AAAA\nzzz.echo=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
                 Xl51cJn9MVTRrEqRWSJVXbUUz9t5Po6Xa247Vr0sJn27R4KoKP8QVj1GuH6dB3b6wTPbOamC3dkO18vkQkfZWUdRMDXk0d8AdjB0E0864nOT~J9Fpnd2\
                 pQE5uoFT6P0DqtQR2jsFvf9ME61aqLvKPPWpkgdn4z6Zkm-NJOcDz2Nv8Si7hli94E9SghMYRsdjU-knObKvxiagn84FIwcOpepxuG~kFXdD5NfsH0v6\
                 Uri3usE3XWD7Pw6P8qVYF39jUIq4OiNMwPnNYzy2N4mDMQdsdHO3LUVh~DEppOy9AAmEoHDjjJxt2BFBbGxfdpZCpENkwvmZeYUyNCCzASqTOOlNzdpn\
@@ -737,9 +737,9 @@ mod tests {
 
         // verify all base64 destinations have been saved under correct keys
         for (key, (_, value)) in addresses {
-            let key = key.strip_suffix(".i2p").unwrap();
+            let key = key.strip_suffix(".echo").unwrap();
 
-            let path = dir.join("addressbook/destinations").join(format!("{key}.i2p.txt"));
+            let path = dir.join("addressbook/destinations").join(format!("{key}.echo.txt"));
             assert_eq!(std::fs::read_to_string(&path).unwrap(), value);
         }
 
@@ -747,19 +747,19 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("addressbook/addresses")).unwrap();
         let mut expected = HashMap::<&str, &str>::from_iter([
             (
-                "psi.i2p",
+                "psi.echo",
                 "avviiexdngd32ccoy4kuckvc3mkf53ycvzbz6vz75vzhv4tbpk5a",
             ),
             (
-                "zerobin.i2p",
+                "zerobin.echo",
                 "3564erslxzaoucqasxsjerk4jz2xril7j2cbzd4p7flpb4ut67hq",
             ),
             (
-                "tracker2.postman.i2p",
+                "tracker2.postman.echo",
                 "6a4kxkg5wp33p25qqhgwl6sj4yh4xuf5b3p3qldwgclebchm3eea",
             ),
             (
-                "zzz.i2p",
+                "zzz.echo",
                 "lhbd7ojcaiofbfku7ixh47qj537g572zmhdc4oilvugzxdpdghua",
             ),
         ]);
@@ -789,7 +789,7 @@ mod tests {
             .await;
 
             let mut addresses = HashMap::<String, (String, String)>::new();
-            let hosts = "tracker2.postman.i2p=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
+            let hosts = "tracker2.postman.echo=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
                 J50lUZgVPhjlI19TgJ-CxyHhHSCeKx5JzURdEW-ucdONMynr-b2zwhsx8VQCJwCEkARvt21YkOyQDaB9IdV8aTAmP~PUJQxRwceaTMn96FcVenwdXqle\
                 E16fI8CVFOV18jbJKrhTOYpTtcZKV4l1wNYBDwKgwPx5c0kcrRzFyw5~bjuAKO~GJ5dR7BQsL7AwBoQUS4k1lwoYrG1kOIBeDD3XF8BWb6K3GOOoyjc1\
                 umYKpur3G~FxBuqtHAsDRICrsRuil8qK~whOvj8uNTv~ohZnTZHxTLgi~sDyo98BwJ-4Y4NMSuF4GLzcgLypcR1D1WY2tDqMKRYFVyLE~MTPVjRRgXfc\
@@ -804,12 +804,12 @@ mod tests {
                 PUlGlh9yIfBY40CQ0Ermy8gzjHLayUpypDJFv2V6rHLwxAQeaXJu8YXbyvCucEu9i6HVO49akXW9YSxcZEqxK04wZnjBqhHGlVbehleMqTx9nkd0pUpB\
                 Zz~vIaG9matUSHinopEo6Wegml9FEz~FEaQpPknKuMAGGSNFVJb0NtaOQSAocAOg1nLKh80v232Y8sJOHG63asSJoBa6bGwjIHftsqD~lEmVV4NkgNPy\
                 bmvsD1SCbMQ2ExaCXFPVQV-yJhIAPN9MRVT9cSBT2GCq-vpMwdJ5Nf0iPR3M-Ak961JUwWXPYTL79toXCgxDX2~nZ5QFRV490YNnfB7LQu10G89wG8lz\
-                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.i2p=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
+                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.echo=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
                 DZRuaToRlXIFW4k5J1ccTzGzMxR518BkCAE3jCFIyrbF0MjQDuXO5cwmqfBFWrIv72xgKDizu3HytE4vOF2M730rv8epSNPAJg6OpyXkf5UQW96kgL8S\
                 WcxWdTbKU-O8IpE3O01Oc6j0fp1E4wVOci7qIL8UEloNN~mulgka69MkR0uEtXWOXd6wvBjLNrZgdZi7XtT4QlDjx13jr7RGpZBJAUkk~8gLqgJwoUYh\
                 bfM7x564PIn3IlMXHK5AKRVxAbCQ5GkS8KdkvNL7FsQ~EiElGzZId4wenraHMHL0destUDmuwGdHKA7YdtovXD~OnaBvIbl36iuIduZnGKPEBD31hVLd\
                 JuVId9RND7lQy5BZJHQss5HSxMWTszAnWJDwmxqzMHHCiL6BMpZnkz8znwPDSkUwEs3P6-ba7mDKKt8EPCG0nM6l~BvPl2OKQIBhXIxJLOOavGyqmmYm\
-                AAAA\nzzz.i2p=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
+                AAAA\nzzz.echo=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
                 Xl51cJn9MVTRrEqRWSJVXbUUz9t5Po6Xa247Vr0sJn27R4KoKP8QVj1GuH6dB3b6wTPbOamC3dkO18vkQkfZWUdRMDXk0d8AdjB0E0864nOT~J9Fpnd2\
                 pQE5uoFT6P0DqtQR2jsFvf9ME61aqLvKPPWpkgdn4z6Zkm-NJOcDz2Nv8Si7hli94E9SghMYRsdjU-knObKvxiagn84FIwcOpepxuG~kFXdD5NfsH0v6\
                 Uri3usE3XWD7Pw6P8qVYF39jUIq4OiNMwPnNYzy2N4mDMQdsdHO3LUVh~DEppOy9AAmEoHDjjJxt2BFBbGxfdpZCpENkwvmZeYUyNCCzASqTOOlNzdpn\
@@ -836,7 +836,7 @@ mod tests {
             let handle = address_book.handle();
 
             // verify all hosts are found
-            for host in ["psi.i2p", "zerobin.i2p", "tracker2.postman.i2p", "zzz.i2p"] {
+            for host in ["psi.echo", "zerobin.echo", "tracker2.postman.echo", "zzz.echo"] {
                 assert!(handle.resolve_base32(host).is_some());
                 assert!(handle.resolve_base64(host.to_string()).await.is_some());
             }
@@ -845,19 +845,19 @@ mod tests {
             //
             // verify that the new destinations are stored on disk, theb base32 address book is
             // updated and that `AddressBookHandle` has the new base32 addresses
-            let new_hosts = "echo.idk.i2p=75Mgd8DeYkNAdk6mrF0rOt3WuM6bYi3k7n3BRIp-np5-5-py1YTmBJSRq9EXL1YrweU\
+            let new_hosts = "echo.idk.echo=75Mgd8DeYkNAdk6mrF0rOt3WuM6bYi3k7n3BRIp-np5-5-py1YTmBJSRq9EXL1YrweU\
                 pal~ZT~46~-lMW~zKHA46iTWsZzKFMEKFdfoM2fSgZDlEaoalW4QzkQjbOVO0atkEK15uXO2WiCRgfUab0Gyp-EcGkdQq\
                 8FuF~sPLlm4xa90cmT6G~s1SeaNLII8DPli-XqZppSGOSArMSEYsxZPNfKs5UxvEeCrbUjBLCGhy2K3x926Af9bZk1ITI\
                 W~K70xo-rSD0SbDXO9vT4e7fiq21Q2LicAofn~Y4MwPz6jr0CUZQAHxwCy1N3OR0XYFsTI4XS1LZ3zGwVpEjCfVD1mQhC\
                 LzzIjRHgGB6Cr3xj3FntBhv0d9pBuogUjOkLEnmFHpj5ONE7l~3aUsR6vRYTUDfwnxXnIi9KF-PPyOAACXCz~T06QXVfa\
                 qzTj8tyr40cUqKIZHquaMZrAkqqa26KM3l0fu755UVo43MfD3f9zo3erjo~UDI~oP1bYyEU3LBQAEAAcAAA==\n3chele\
-                ctricboogaloo.i2p=W5br4iApDNRQ-IY0yZQqrv-BqIj5Rk1XytcDUHcTpGHiyeaEPlP3wRr~zMTKrlCh78IRI26m8Gw\
+                ctricboogaloo.echo=W5br4iApDNRQ-IY0yZQqrv-BqIj5Rk1XytcDUHcTpGHiyeaEPlP3wRr~zMTKrlCh78IRI26m8Gw\
                 jE2VKdoMMwl9j9GdikQX4p4J0912IcRZbFGVIkibe36KgqkKJ9-s1gv4yzDVjEG2ZE6CMn-NZJxyp3a7Ypa1UFDLATdep\
                 KFhHZRK3EN9fcUfMy2EAMwgihnd4JVZTytSVOcKfUrhIXf1lKmgr9qN9uXv38q2mtYMzbnWNe6TlB9GWrAZnsREB1kEZM\
                 ts28leSGB~kYJHSlxQQvgOA0Rt9s3xkvP~EThUmyIIDZ9SlBh8iek6E1wreHfRhsCA9qTdCcs5XivxG0CMJR4F-Q55AlS\
                 FWthsgJrUrb9x4RB6fTANv5bvZH3yBMQvZZxgqu4sN6MbPVaW2X7x3ldq3~UwG~HXvdvA7wP-sBq3uEshPCuVhJD8ojUD\
                 qm9prLIVuLWt2pIiVbz-l4P-jx769A0OoN8-Z6j5b7zLNdd~QX0NPfXVMp1V~Z4fFBQAEAAcAAA==\ngts.varikvalef\
-                or.i2p=cqwoYXfztQTzDKaPMsElmgfflDLLRBBvQSTgHfhBKnGkT-lKzL659h480A9YQuZfmKSzaplidYTvMPIrS4lhh4\
+                or.echo=cqwoYXfztQTzDKaPMsElmgfflDLLRBBvQSTgHfhBKnGkT-lKzL659h480A9YQuZfmKSzaplidYTvMPIrS4lhh4\
                 m7ybvkt3Dv9bLd8QR7k14gw~arshKakr6HgkpUXU8uwA6ns45bsLKe~PbASIGbPEIudRjtrvmRpXxqy~0mpjkXkhhm8RJ\
                 x3CM7iO62ZyspCXTI2GV2rbvcxyD6kEcQd-YrU5tnimSUN8b1WqbkoQBvEn1JR~mn-KJzR4RUpKd~FgqPesMI2rM8dyl4\
                 bQkHv3XrWU3YZ75bsXaht80Ii6rrcPrD3LCERIC43rII0Y1UQarpij2ZyC508ccveIbGroUWOsrPz8tLklnIuvZIor~2M\
@@ -870,13 +870,13 @@ mod tests {
 
             // verify all old and new hosts are found
             for host in [
-                "psi.i2p",
-                "zerobin.i2p",
-                "tracker2.postman.i2p",
-                "zzz.i2p",
-                "echo.idk.i2p",
-                "3chelectricboogaloo.i2p",
-                "gts.varikvalefor.i2p",
+                "psi.echo",
+                "zerobin.echo",
+                "tracker2.postman.echo",
+                "zzz.echo",
+                "echo.idk.echo",
+                "3chelectricboogaloo.echo",
+                "gts.varikvalefor.echo",
             ] {
                 assert!(handle.resolve_base32(host).is_some());
                 assert!(handle.resolve_base64(host.to_string()).await.is_some());
@@ -896,13 +896,13 @@ mod tests {
             let handle = address_book.handle();
 
             for host in [
-                "psi.i2p",
-                "zerobin.i2p",
-                "tracker2.postman.i2p",
-                "zzz.i2p",
-                "echo.idk.i2p",
-                "3chelectricboogaloo.i2p",
-                "gts.varikvalefor.i2p",
+                "psi.echo",
+                "zerobin.echo",
+                "tracker2.postman.echo",
+                "zzz.echo",
+                "echo.idk.echo",
+                "3chelectricboogaloo.echo",
+                "gts.varikvalefor.echo",
             ] {
                 assert!(handle.resolve_base32(host).is_some());
                 assert!(handle.resolve_base64(host.to_string()).await.is_some());
@@ -927,7 +927,7 @@ mod tests {
             .await;
 
             let mut addresses = HashMap::<String, (String, String)>::new();
-            let hosts = "tracker2.postman.i2p=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
+            let hosts = "tracker2.postman.echo=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
                 J50lUZgVPhjlI19TgJ-CxyHhHSCeKx5JzURdEW-ucdONMynr-b2zwhsx8VQCJwCEkARvt21YkOyQDaB9IdV8aTAmP~PUJQxRwceaTMn96FcVenwdXqle\
                 E16fI8CVFOV18jbJKrhTOYpTtcZKV4l1wNYBDwKgwPx5c0kcrRzFyw5~bjuAKO~GJ5dR7BQsL7AwBoQUS4k1lwoYrG1kOIBeDD3XF8BWb6K3GOOoyjc1\
                 umYKpur3G~FxBuqtHAsDRICrsRuil8qK~whOvj8uNTv~ohZnTZHxTLgi~sDyo98BwJ-4Y4NMSuF4GLzcgLypcR1D1WY2tDqMKRYFVyLE~MTPVjRRgXfc\
@@ -942,12 +942,12 @@ mod tests {
                 PUlGlh9yIfBY40CQ0Ermy8gzjHLayUpypDJFv2V6rHLwxAQeaXJu8YXbyvCucEu9i6HVO49akXW9YSxcZEqxK04wZnjBqhHGlVbehleMqTx9nkd0pUpB\
                 Zz~vIaG9matUSHinopEo6Wegml9FEz~FEaQpPknKuMAGGSNFVJb0NtaOQSAocAOg1nLKh80v232Y8sJOHG63asSJoBa6bGwjIHftsqD~lEmVV4NkgNPy\
                 bmvsD1SCbMQ2ExaCXFPVQV-yJhIAPN9MRVT9cSBT2GCq-vpMwdJ5Nf0iPR3M-Ak961JUwWXPYTL79toXCgxDX2~nZ5QFRV490YNnfB7LQu10G89wG8lz\
-                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.i2p=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
+                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.echo=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
                 DZRuaToRlXIFW4k5J1ccTzGzMxR518BkCAE3jCFIyrbF0MjQDuXO5cwmqfBFWrIv72xgKDizu3HytE4vOF2M730rv8epSNPAJg6OpyXkf5UQW96kgL8S\
                 WcxWdTbKU-O8IpE3O01Oc6j0fp1E4wVOci7qIL8UEloNN~mulgka69MkR0uEtXWOXd6wvBjLNrZgdZi7XtT4QlDjx13jr7RGpZBJAUkk~8gLqgJwoUYh\
                 bfM7x564PIn3IlMXHK5AKRVxAbCQ5GkS8KdkvNL7FsQ~EiElGzZId4wenraHMHL0destUDmuwGdHKA7YdtovXD~OnaBvIbl36iuIduZnGKPEBD31hVLd\
                 JuVId9RND7lQy5BZJHQss5HSxMWTszAnWJDwmxqzMHHCiL6BMpZnkz8znwPDSkUwEs3P6-ba7mDKKt8EPCG0nM6l~BvPl2OKQIBhXIxJLOOavGyqmmYm\
-                AAAA\nzzz.i2p=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
+                AAAA\nzzz.echo=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
                 Xl51cJn9MVTRrEqRWSJVXbUUz9t5Po6Xa247Vr0sJn27R4KoKP8QVj1GuH6dB3b6wTPbOamC3dkO18vkQkfZWUdRMDXk0d8AdjB0E0864nOT~J9Fpnd2\
                 pQE5uoFT6P0DqtQR2jsFvf9ME61aqLvKPPWpkgdn4z6Zkm-NJOcDz2Nv8Si7hli94E9SghMYRsdjU-knObKvxiagn84FIwcOpepxuG~kFXdD5NfsH0v6\
                 Uri3usE3XWD7Pw6P8qVYF39jUIq4OiNMwPnNYzy2N4mDMQdsdHO3LUVh~DEppOy9AAmEoHDjjJxt2BFBbGxfdpZCpENkwvmZeYUyNCCzASqTOOlNzdpn\
@@ -972,20 +972,20 @@ mod tests {
             let handle = address_book.handle();
 
             handle.add_base32(
-                "i2pd.i2p".to_string(),
+                "i2pd.echo".to_string(),
                 "4bpcp4fmvyr46vb4kqjvtxlst6puz4r3dld24umooiy5mesxzspa".to_string(),
             );
 
             // verify that base32 address for i2pd is found
             assert_eq!(
-                handle.resolve_base32("i2pd.i2p"),
+                handle.resolve_base32("i2pd.echo"),
                 Some(String::from(
                     "4bpcp4fmvyr46vb4kqjvtxlst6puz4r3dld24umooiy5mesxzspa"
                 ))
             );
         }
 
-        // simulate another boot and verify i2pd.i2p has been stored on disk
+        // simulate another boot and verify i2pd.echo has been stored on disk
         let address_book = AddressBookManager::new(
             dir.clone(),
             AddressBookConfig {
@@ -996,7 +996,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            address_book.handle().resolve_base32("i2pd.i2p"),
+            address_book.handle().resolve_base32("i2pd.echo"),
             Some(String::from(
                 "4bpcp4fmvyr46vb4kqjvtxlst6puz4r3dld24umooiy5mesxzspa"
             ))
@@ -1020,7 +1020,7 @@ mod tests {
             .await;
 
             let mut addresses = HashMap::<String, (String, String)>::new();
-            let hosts = "tracker2.postman.i2p=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
+            let hosts = "tracker2.postman.echo=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
                 J50lUZgVPhjlI19TgJ-CxyHhHSCeKx5JzURdEW-ucdONMynr-b2zwhsx8VQCJwCEkARvt21YkOyQDaB9IdV8aTAmP~PUJQxRwceaTMn96FcVenwdXqle\
                 E16fI8CVFOV18jbJKrhTOYpTtcZKV4l1wNYBDwKgwPx5c0kcrRzFyw5~bjuAKO~GJ5dR7BQsL7AwBoQUS4k1lwoYrG1kOIBeDD3XF8BWb6K3GOOoyjc1\
                 umYKpur3G~FxBuqtHAsDRICrsRuil8qK~whOvj8uNTv~ohZnTZHxTLgi~sDyo98BwJ-4Y4NMSuF4GLzcgLypcR1D1WY2tDqMKRYFVyLE~MTPVjRRgXfc\
@@ -1035,12 +1035,12 @@ mod tests {
                 PUlGlh9yIfBY40CQ0Ermy8gzjHLayUpypDJFv2V6rHLwxAQeaXJu8YXbyvCucEu9i6HVO49akXW9YSxcZEqxK04wZnjBqhHGlVbehleMqTx9nkd0pUpB\
                 Zz~vIaG9matUSHinopEo6Wegml9FEz~FEaQpPknKuMAGGSNFVJb0NtaOQSAocAOg1nLKh80v232Y8sJOHG63asSJoBa6bGwjIHftsqD~lEmVV4NkgNPy\
                 bmvsD1SCbMQ2ExaCXFPVQV-yJhIAPN9MRVT9cSBT2GCq-vpMwdJ5Nf0iPR3M-Ak961JUwWXPYTL79toXCgxDX2~nZ5QFRV490YNnfB7LQu10G89wG8lz\
-                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.i2p=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
+                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.echo=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
                 DZRuaToRlXIFW4k5J1ccTzGzMxR518BkCAE3jCFIyrbF0MjQDuXO5cwmqfBFWrIv72xgKDizu3HytE4vOF2M730rv8epSNPAJg6OpyXkf5UQW96kgL8S\
                 WcxWdTbKU-O8IpE3O01Oc6j0fp1E4wVOci7qIL8UEloNN~mulgka69MkR0uEtXWOXd6wvBjLNrZgdZi7XtT4QlDjx13jr7RGpZBJAUkk~8gLqgJwoUYh\
                 bfM7x564PIn3IlMXHK5AKRVxAbCQ5GkS8KdkvNL7FsQ~EiElGzZId4wenraHMHL0destUDmuwGdHKA7YdtovXD~OnaBvIbl36iuIduZnGKPEBD31hVLd\
                 JuVId9RND7lQy5BZJHQss5HSxMWTszAnWJDwmxqzMHHCiL6BMpZnkz8znwPDSkUwEs3P6-ba7mDKKt8EPCG0nM6l~BvPl2OKQIBhXIxJLOOavGyqmmYm\
-                AAAA\nzzz.i2p=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
+                AAAA\nzzz.echo=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
                 Xl51cJn9MVTRrEqRWSJVXbUUz9t5Po6Xa247Vr0sJn27R4KoKP8QVj1GuH6dB3b6wTPbOamC3dkO18vkQkfZWUdRMDXk0d8AdjB0E0864nOT~J9Fpnd2\
                 pQE5uoFT6P0DqtQR2jsFvf9ME61aqLvKPPWpkgdn4z6Zkm-NJOcDz2Nv8Si7hli94E9SghMYRsdjU-knObKvxiagn84FIwcOpepxuG~kFXdD5NfsH0v6\
                 Uri3usE3XWD7Pw6P8qVYF39jUIq4OiNMwPnNYzy2N4mDMQdsdHO3LUVh~DEppOy9AAmEoHDjjJxt2BFBbGxfdpZCpENkwvmZeYUyNCCzASqTOOlNzdpn\
@@ -1074,24 +1074,24 @@ mod tests {
             let deserialized = base64_decode(&base64_destination).unwrap();
             let destination = Destination::parse(&deserialized).unwrap();
 
-            handle.add_base64("echo.idk.i2p".to_string(), destination);
+            handle.add_base64("echo.idk.echo".to_string(), destination);
 
             // verify that base32 address for echo.idk is found
             assert_eq!(
-                handle.resolve_base32("echo.idk.i2p"),
+                handle.resolve_base32("echo.idk.echo"),
                 Some(String::from(
                     "63sgpiu6f33arldcxkbjsn3jgf6asyx3onjmz6j6gsk7hgbiehkq"
                 ))
             );
             assert_eq!(
-                handle.resolve_base64("echo.idk.i2p".to_string()).await,
+                handle.resolve_base64("echo.idk.echo".to_string()).await,
                 Some(base64_destination.to_string())
             );
 
             base64_destination
         };
 
-        // simulate another boot and verify i2pd.i2p has been stored on disk
+        // simulate another boot and verify i2pd.echo has been stored on disk
         let address_book = AddressBookManager::new(
             dir.clone(),
             AddressBookConfig {
@@ -1103,20 +1103,20 @@ mod tests {
         let handle = address_book.handle();
 
         assert_eq!(
-            handle.resolve_base32("echo.idk.i2p"),
+            handle.resolve_base32("echo.idk.echo"),
             Some(String::from(
                 "63sgpiu6f33arldcxkbjsn3jgf6asyx3onjmz6j6gsk7hgbiehkq"
             ))
         );
         assert_eq!(
-            handle.resolve_base64("echo.idk.i2p".to_string()).await,
+            handle.resolve_base64("echo.idk.echo".to_string()).await,
             Some(base64_destination.to_string())
         );
     }
 
     #[tokio::test]
     async fn remove_host() {
-        // create address book and remove zzz.i2p from it
+        // create address book and remove zzz.echo from it
         let dir = {
             let dir = tempdir().unwrap().keep();
             tokio::fs::create_dir_all(&dir.join("addressbook")).await.unwrap();
@@ -1131,7 +1131,7 @@ mod tests {
             .await;
 
             let mut addresses = HashMap::<String, (String, String)>::new();
-            let hosts = "tracker2.postman.i2p=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
+            let hosts = "tracker2.postman.echo=lnQ6yoBTxQuQU8EQ1FlF395ITIQF-HGJxUeFvzETLFnoczNjQvKDbtSB7aHhn853zjVXrJBgwlB9sO57KakBDa\
                 J50lUZgVPhjlI19TgJ-CxyHhHSCeKx5JzURdEW-ucdONMynr-b2zwhsx8VQCJwCEkARvt21YkOyQDaB9IdV8aTAmP~PUJQxRwceaTMn96FcVenwdXqle\
                 E16fI8CVFOV18jbJKrhTOYpTtcZKV4l1wNYBDwKgwPx5c0kcrRzFyw5~bjuAKO~GJ5dR7BQsL7AwBoQUS4k1lwoYrG1kOIBeDD3XF8BWb6K3GOOoyjc1\
                 umYKpur3G~FxBuqtHAsDRICrsRuil8qK~whOvj8uNTv~ohZnTZHxTLgi~sDyo98BwJ-4Y4NMSuF4GLzcgLypcR1D1WY2tDqMKRYFVyLE~MTPVjRRgXfc\
@@ -1146,12 +1146,12 @@ mod tests {
                 PUlGlh9yIfBY40CQ0Ermy8gzjHLayUpypDJFv2V6rHLwxAQeaXJu8YXbyvCucEu9i6HVO49akXW9YSxcZEqxK04wZnjBqhHGlVbehleMqTx9nkd0pUpB\
                 Zz~vIaG9matUSHinopEo6Wegml9FEz~FEaQpPknKuMAGGSNFVJb0NtaOQSAocAOg1nLKh80v232Y8sJOHG63asSJoBa6bGwjIHftsqD~lEmVV4NkgNPy\
                 bmvsD1SCbMQ2ExaCXFPVQV-yJhIAPN9MRVT9cSBT2GCq-vpMwdJ5Nf0iPR3M-Ak961JUwWXPYTL79toXCgxDX2~nZ5QFRV490YNnfB7LQu10G89wG8lz\
-                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.i2p=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
+                S9GWf2i-nk~~ez0Lq0dH7qQokFXdUkPc7bvSrxqkytrbd-h8O8AAAA\nzerobin.echo=Jf64hlpW8ILKZGDe61ljHU5wzmUYwN2klOyhM2iR-8VkUEVg\
                 DZRuaToRlXIFW4k5J1ccTzGzMxR518BkCAE3jCFIyrbF0MjQDuXO5cwmqfBFWrIv72xgKDizu3HytE4vOF2M730rv8epSNPAJg6OpyXkf5UQW96kgL8S\
                 WcxWdTbKU-O8IpE3O01Oc6j0fp1E4wVOci7qIL8UEloNN~mulgka69MkR0uEtXWOXd6wvBjLNrZgdZi7XtT4QlDjx13jr7RGpZBJAUkk~8gLqgJwoUYh\
                 bfM7x564PIn3IlMXHK5AKRVxAbCQ5GkS8KdkvNL7FsQ~EiElGzZId4wenraHMHL0destUDmuwGdHKA7YdtovXD~OnaBvIbl36iuIduZnGKPEBD31hVLd\
                 JuVId9RND7lQy5BZJHQss5HSxMWTszAnWJDwmxqzMHHCiL6BMpZnkz8znwPDSkUwEs3P6-ba7mDKKt8EPCG0nM6l~BvPl2OKQIBhXIxJLOOavGyqmmYm\
-                AAAA\nzzz.i2p=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
+                AAAA\nzzz.echo=GKapJ8koUcBj~jmQzHsTYxDg2tpfWj0xjQTzd8BhfC9c3OS5fwPBNajgF-eOD6eCjFTqTlorlh7Hnd8kXj1qblUGXT-tDoR9~YV8dm\
                 Xl51cJn9MVTRrEqRWSJVXbUUz9t5Po6Xa247Vr0sJn27R4KoKP8QVj1GuH6dB3b6wTPbOamC3dkO18vkQkfZWUdRMDXk0d8AdjB0E0864nOT~J9Fpnd2\
                 pQE5uoFT6P0DqtQR2jsFvf9ME61aqLvKPPWpkgdn4z6Zkm-NJOcDz2Nv8Si7hli94E9SghMYRsdjU-knObKvxiagn84FIwcOpepxuG~kFXdD5NfsH0v6\
                 Uri3usE3XWD7Pw6P8qVYF39jUIq4OiNMwPnNYzy2N4mDMQdsdHO3LUVh~DEppOy9AAmEoHDjjJxt2BFBbGxfdpZCpENkwvmZeYUyNCCzASqTOOlNzdpn\
@@ -1161,19 +1161,19 @@ mod tests {
             address_book.save_to_disk(addresses).await;
 
             let handle = address_book.handle();
-            assert!(handle.resolve_base32("zzz.i2p").is_some());
-            assert!(handle.resolve_base64("zzz.i2p".to_string()).await.is_some());
+            assert!(handle.resolve_base32("zzz.echo").is_some());
+            assert!(handle.resolve_base64("zzz.echo".to_string()).await.is_some());
 
             // remove host and verify it's no longer found
-            handle.remove("zzz.i2p");
+            handle.remove("zzz.echo");
 
-            assert!(handle.resolve_base32("zzz.i2p").is_none());
-            assert!(handle.resolve_base64("zzz.i2p".to_string()).await.is_none());
+            assert!(handle.resolve_base32("zzz.echo").is_none());
+            assert!(handle.resolve_base64("zzz.echo".to_string()).await.is_none());
 
             dir
         };
 
-        // simulate another boot and verify zzz.i2p is not found in the address book
+        // simulate another boot and verify zzz.echo is not found in the address book
         let address_book = AddressBookManager::new(
             dir.clone(),
             AddressBookConfig {
@@ -1184,7 +1184,7 @@ mod tests {
         .await;
         let handle = address_book.handle();
 
-        assert!(handle.resolve_base32("zzz.i2p").is_none());
-        assert!(handle.resolve_base64("zzz.i2p".to_string()).await.is_none());
+        assert!(handle.resolve_base32("zzz.echo").is_none());
+        assert!(handle.resolve_base64("zzz.echo".to_string()).await.is_none());
     }
 }

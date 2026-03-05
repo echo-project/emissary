@@ -292,7 +292,7 @@ mod tests {
         tokio::spawn(proxy.run());
 
         assert!(
-            Socks4Stream::connect(address, "http://host.i2p".to_string(), 80, false)
+            Socks4Stream::connect(address, "http://host.echo".to_string(), 80, false)
                 .await
                 .is_err()
         )
@@ -322,7 +322,7 @@ mod tests {
 
         assert!(Socks5Stream::connect_with_password(
             address,
-            "http://host.i2p".to_string(),
+            "http://host.echo".to_string(),
             80,
             "username".to_string(),
             "password".to_string(),

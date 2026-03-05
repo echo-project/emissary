@@ -320,7 +320,7 @@ pub struct SamSession<R: Runtime> {
 
     /// Pending host lookups.
     ///
-    /// Pending `NAMING LOOKUP` queries for `.b32.i2p` addresses are stored here
+    /// Pending `NAMING LOOKUP` queries for `.b32.echo` addresses are stored here
     /// while the corresponding lease set is being queried.
     pending_host_lookups: HashMap<DestinationId, String>,
 
@@ -1114,10 +1114,10 @@ impl<R: Runtime> SamSession<R> {
     /// Handle `NAMING LOOKUP` query from the client.
     ///
     /// The query can either be for `ME`, meaning the [`Destination`] of [`SamSession`] is returned,
-    /// a `.b32.i2p` which starts a lease set query for the destination. or a `.i2p` host name which
+    /// a `.b32.echo` which starts a lease set query for the destination. or a `.echo` host name which
     /// is looked up from an address book if it exists.
     ///
-    /// For `.b32.i2p`/`.i2p`, naming reply is deferred until the query is finished.
+    /// For `.b32.echo`/`.echo`, naming reply is deferred until the query is finished.
     fn on_naming_lookup(&mut self, name: String) {
         if name.as_str() == "ME" {
             tracing::debug!(
@@ -1140,15 +1140,15 @@ impl<R: Runtime> SamSession<R> {
             return;
         }
 
-        // if the host name ends in `.b32.i2p`, validate the hostname and check if [`Destination`]
+        // if the host name ends in `.b32.echo`, validate the hostname and check if [`Destination`]
         // already holds the host's lease set and if not, start a query
         //
         // once the query finishes, the naming reply is sent to client
-        if let Some(end) = name.find(".b32.i2p") {
+        if let Some(end) = name.find(".b32.echo") {
             tracing::debug!(
                 target: LOG_TARGET,
                 session_id = %self.session_id,
-                "naming lookup for .b32.i2p address",
+                "naming lookup for .b32.echo address",
             );
 
             let start = if name.starts_with("http://") {
@@ -1165,7 +1165,7 @@ impl<R: Runtime> SamSession<R> {
                         target: LOG_TARGET,
                         session_id = %self.session_id,
                         ?name,
-                        "invalid .b32.i2p address",
+                        "invalid .b32.echo address",
                     );
 
                     Some(
@@ -1226,7 +1226,7 @@ impl<R: Runtime> SamSession<R> {
             return;
         }
 
-        let message = match name.find(".i2p") {
+        let message = match name.find(".echo") {
             None => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -1893,7 +1893,7 @@ mod tests {
     #[tokio::test]
     async fn naming_lookup_b32_invalid() {
         let (mut session, mut ctx) = create_session().await;
-        session.on_naming_lookup("invalid.b32.i2p".to_string());
+        session.on_naming_lookup("invalid.b32.echo".to_string());
         tokio::spawn(async move { session.socket.as_mut().expect("to exist").next().await });
 
         // verify response contains base64 encoded destination
@@ -1914,7 +1914,7 @@ mod tests {
         let (mut session, mut ctx) = create_session().await;
 
         // test with http:// prefix
-        session.on_naming_lookup("http://abcdef.b32.i2p".to_string());
+        session.on_naming_lookup("http://abcdef.b32.echo".to_string());
         tokio::spawn(async move { session.socket.as_mut().expect("to exist").next().await });
 
         // verify error response when no address book exists
@@ -1934,7 +1934,7 @@ mod tests {
         let (mut session, mut ctx) = create_session().await;
 
         // test with https:// prefix
-        session.on_naming_lookup("https://abcdef.b32.i2p".to_string());
+        session.on_naming_lookup("https://abcdef.b32.echo".to_string());
         tokio::spawn(async move { session.socket.as_mut().expect("to exist").next().await });
 
         // verify error response when no address book exists
@@ -1952,7 +1952,7 @@ mod tests {
     #[tokio::test]
     async fn naming_lookup_i2p_no_addressbook() {
         let (mut session, mut ctx) = create_session().await;
-        session.on_naming_lookup("example.i2p".to_string());
+        session.on_naming_lookup("example.echo".to_string());
         tokio::spawn(async move { session.socket.as_mut().expect("to exist").next().await });
 
         // verify error response when no address book exists
