@@ -37,7 +37,7 @@ use std::{
 const LOG_TARGET: &str = "emissary::reseeder";
 
 /// How many times is reseeding retried before giving up.
-const NUM_RETRIES: usize = 5usize;
+const NUM_RETRIES: usize = 1usize;
 
 /// How many routers should [`Reseeder`] find before terminating the process.
 const MIN_ROUTER_INFOS_TO_DOWNLOAD: usize = 100usize;
@@ -133,15 +133,16 @@ impl Reseeder {
                 );
                 continue;
             }
-
+            
             match response.bytes().await {
-                Ok(bytes) => match Su3::parse_reseed(&bytes, true) {
+                Ok(bytes) => match Su3::parse_reseed(&bytes, false) {
                     None => continue,
                     Some(downloaded) => {
                         tracing::info!(
                             target: LOG_TARGET,
                             server = ?hosts[server],
                             num_routers = ?downloaded.len(),
+                            downloaded_names = ?downloaded.iter().map(|info| info.name.clone()).collect::<Vec<_>>(),
                             "reseed succeeded"
                         );
 

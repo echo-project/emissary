@@ -22,6 +22,7 @@ use crate::{
     crypto::StaticPublicKey,
     primitives::{RouterId, TransportKind, TunnelId},
     profile::{Bucket, ProfileStorage},
+    private_network::PrivateNetworkValidator,
     runtime::Runtime,
     tunnel::pool::TunnelPoolContextHandle,
     util::shuffle,
@@ -41,7 +42,7 @@ use core::{
     net::SocketAddr,
     sync::atomic::{AtomicUsize, Ordering},
 };
-
+use std::sync::{Arc as StdArc, Mutex};
 /// Logging target for the file.
 const LOG_TARGET: &str = "emissary::tunnel::selector";
 
@@ -95,7 +96,7 @@ pub trait TunnelSelector: Send + Unpin {
 /// This trait has two implementations: [`ExploratorySelector`] for exploratory tunnel pools and
 /// [`ClientSelector`] for client tunnel pools.
 pub trait HopSelector: Send + Unpin {
-    fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>>;
+    fn select_hops(&self, num_hops: usize, direction: crate::tunnel::hop::TunnelDirection) -> Option<Vec<(Bytes, StaticPublicKey)>>;
 }
 
 /// Tunnel/hop selector for the exploratory tunnel pool.
@@ -128,6 +129,9 @@ pub struct ExploratorySelector<R: Runtime> {
 
     /// Router participation.
     router_participation: Arc<RwLock<HashMap<RouterId, usize>>>,
+
+    /// Private network validator.
+    private_network: StdArc<Mutex<PrivateNetworkValidator>>,
 }
 
 impl<R: Runtime> ExploratorySelector<R> {
@@ -136,6 +140,7 @@ impl<R: Runtime> ExploratorySelector<R> {
         profile_storage: ProfileStorage<R>,
         handle: TunnelPoolContextHandle,
         insecure: bool,
+        private_network: StdArc<Mutex<PrivateNetworkValidator>>,
     ) -> Self {
         Self {
             handle,
@@ -145,6 +150,7 @@ impl<R: Runtime> ExploratorySelector<R> {
             outbound: Default::default(),
             profile_storage,
             router_participation: Default::default(),
+            private_network,
         }
     }
 
@@ -375,75 +381,184 @@ impl<R: Runtime> TunnelSelector for ExploratorySelector<R> {
 
 impl<R: Runtime> HopSelector for ExploratorySelector<R> {
     // TODO: refactor
-    fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
-        let mut router_ids = self.profile_storage.get_router_ids(
+    fn select_hops(&self, num_hops: usize, direction: crate::tunnel::hop::TunnelDirection) -> Option<Vec<(Bytes, StaticPublicKey)>> {
+        use crate::tunnel::hop::TunnelDirection;
+        use crate::i2np::HopRole;
+
+        // Determine which positions are endpoints vs participants
+        let get_role_for_position = |index: usize| -> HopRole {
+            match direction {
+                TunnelDirection::Inbound => {
+                    if index == 0 {
+                        HopRole::InboundGateway // First hop is IBGW (can be unknown)
+                    } else {
+                        HopRole::Participant // Rest are participants (must be known)
+                    }
+                }
+                TunnelDirection::Outbound => {
+                    if index == num_hops - 1 {
+                        HopRole::OutboundEndpoint // Last hop is OBEP (can be unknown)
+                    } else {
+                        HopRole::Participant // Rest are participants (must be known)
+                    }
+                }
+            }
+        };
+
+        // Filter routers that can be participants (must be known relays)
+        let mut participant_routers = self.profile_storage.get_router_ids(
             Bucket::Standard,
             |router_id, router_info, profile| {
                 !profile.is_failing::<R>()
                     && router_info.is_reachable()
                     && router_info.is_usable()
                     && (self.insecure || self.can_participate(router_id))
+                    && self.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                        router_id,
+                        router_info,
+                        HopRole::Participant,
+                    )
             },
         );
 
+        // Filter routers that can be endpoints (can be unknown)
+        let endpoint_routers = self.profile_storage.get_router_ids(
+            Bucket::Standard,
+            |router_id, router_info, profile| {
+                !profile.is_failing::<R>()
+                    && router_info.is_reachable()
+                    && router_info.is_usable()
+                    && (self.insecure || self.can_participate(router_id))
+                    && {
+                        let role = match direction {
+                            TunnelDirection::Inbound => HopRole::InboundGateway,
+                            TunnelDirection::Outbound => HopRole::OutboundEndpoint,
+                        };
+                        self.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                            router_id,
+                            router_info,
+                            role,
+                        )
+                    }
+            },
+        );
+
+        // For participant positions, we need known relays
+        // For endpoint positions, we can use any router (known or unknown)
+        // Since known relays can be both participants and endpoints, we use participant_routers
+        // as the base pool, and endpoint_routers as additional options for endpoint positions
+        
         // insecure tunnels are allowed, don't do safety checks
         if self.insecure {
-            shuffle(&mut router_ids, &mut R::rng());
+            // Determine how many participant positions we need
+            let num_participant_positions = match direction {
+                TunnelDirection::Inbound => num_hops - 1, // All except first (IBGW)
+                TunnelDirection::Outbound => num_hops - 1, // All except last (OBEP)
+            };
 
-            if router_ids.len() < num_hops {
-                let mut extra_router_ids =
-                    self.profile_storage.get_router_ids(Bucket::Fast, |_, router_info, profile| {
+            // We need at least num_participant_positions known relays
+            if participant_routers.len() < num_participant_positions {
+                // Try to get more known relays from Fast bucket
+                let mut extra_participants = self.profile_storage.get_router_ids(
+                    Bucket::Fast,
+                    |router_id, router_info, profile| {
                         !profile.is_failing::<R>()
                             && router_info.is_reachable()
                             && router_info.is_usable()
-                    });
-
-                // if there aren't enough routers in the fast bucket,
-                // attempt to use untracked routers
-                let num_needed = num_hops - router_ids.len();
-
-                if num_needed > extra_router_ids.len() {
-                    let untracked = self.profile_storage.get_router_ids(
-                        Bucket::Untracked,
-                        |_, router_info, profile| {
-                            !profile.is_failing::<R>()
-                                && router_info.is_reachable()
-                                && router_info.is_usable()
-                        },
-                    );
-
-                    extra_router_ids.extend(untracked);
-                    extra_router_ids = extra_router_ids
-                        .into_iter()
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                }
-
-                // if there aren't enough routers, use failing routers
-                if num_needed > extra_router_ids.len() {
-                    let failing =
-                        self.profile_storage.get_router_ids(Bucket::Any, |_, router_info, _| {
-                            router_info.is_reachable()
-                        });
-
-                    extra_router_ids.extend(failing);
-                    extra_router_ids = extra_router_ids
-                        .into_iter()
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                }
-
-                if num_needed > extra_router_ids.len() {
-                    return None;
-                }
-
-                shuffle(&mut extra_router_ids, &mut R::rng());
-                router_ids.extend(extra_router_ids.into_iter().take(num_needed));
+                            && self.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                                router_id,
+                                router_info,
+                                HopRole::Participant,
+                            )
+                    },
+                );
+                participant_routers.extend(extra_participants);
             }
 
-            router_ids.iter().take(num_hops).for_each(|router_id| {
+            if participant_routers.len() < num_participant_positions {
+                // Try untracked known relays
+                let untracked_participants = self.profile_storage.get_router_ids(
+                    Bucket::Untracked,
+                    |router_id, router_info, profile| {
+                        !profile.is_failing::<R>()
+                            && router_info.is_reachable()
+                            && router_info.is_usable()
+                            && self.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                                router_id,
+                                router_info,
+                                HopRole::Participant,
+                            )
+                    },
+                );
+                participant_routers.extend(untracked_participants);
+            }
+
+            if participant_routers.len() < num_participant_positions {
+                return None; // Not enough known relays for participant positions
+            }
+
+            // Shuffle and select participant routers
+            let mut selected_routers = participant_routers;
+            shuffle(&mut selected_routers, &mut R::rng());
+            let selected_routers_vec: Vec<RouterId> = selected_routers.into_iter().collect();
+            let mut router_ids: Vec<RouterId> = selected_routers_vec.iter().take(num_participant_positions).cloned().collect();
+
+            // Add endpoint router if needed (for the endpoint position)
+            let endpoint_position = match direction {
+                TunnelDirection::Inbound => 0, // First position
+                TunnelDirection::Outbound => num_hops - 1, // Last position
+            };
+
+            // Shuffle endpoint routers and select one
+            let mut endpoint_pool = endpoint_routers;
+            shuffle(&mut endpoint_pool, &mut R::rng());
+            
+            // Insert endpoint router at the correct position
+            if let Some(endpoint_router) = endpoint_pool.into_iter().next() {
+                match direction {
+                    TunnelDirection::Inbound => router_ids.insert(0, endpoint_router),
+                    TunnelDirection::Outbound => router_ids.push(endpoint_router),
+                }
+            } else {
+                // No endpoint router available, but we can use a known relay as endpoint
+                // (known relays can be both participants and endpoints)
+                // Since we already have num_participant_positions routers, and we need num_hops total,
+                // we need one more. If we have extra participant routers, use one as endpoint.
+                if router_ids.len() < num_hops {
+                    // We need one more router - take another from participant pool if available
+                    // (we already took num_participant_positions, but we need one more for endpoint)
+                    if selected_routers_vec.len() > num_participant_positions {
+                        let additional_router = selected_routers_vec.get(num_participant_positions).cloned();
+                        if let Some(router) = additional_router {
+                            match direction {
+                                TunnelDirection::Inbound => router_ids.insert(0, router),
+                                TunnelDirection::Outbound => router_ids.push(router),
+                            }
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        return None; // Not enough routers
+                    }
+                }
+            }
+
+            // Ensure we have exactly num_hops
+            // At this point, router_ids should have num_participant_positions routers
+            // and we've added an endpoint router, so we should have num_hops
+            // But if we don't (e.g., endpoint pool was empty and we used a participant as endpoint),
+            // we need to adjust
+            if router_ids.len() != num_hops {
+                // This shouldn't happen, but handle it gracefully
+                if router_ids.len() > num_hops {
+                    router_ids.truncate(num_hops);
+                } else {
+                    // Not enough routers - this should have been caught earlier
+                    return None;
+                }
+            }
+
+            router_ids.iter().for_each(|router_id| {
                 self.profile_storage.selected_for_tunnel(router_id);
             });
 
@@ -464,9 +579,14 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             );
         }
 
+        // For secure tunnels, we need to ensure participant positions use known relays
+        // and endpoint positions can use any router. The subnet grouping logic is complex,
+        // so we'll use participant_routers as the base and ensure endpoint positions can use endpoint_routers
+        
         // group addresses by /16 subnet to prevent having two routers
         // from the same subnet in the same tunnel
-        let mut addresses = self.group_by_subnet(router_ids);
+        // Use participant routers for subnet grouping (they can be used for both roles)
+        let mut addresses = self.group_by_subnet(participant_routers);
 
         let router_ids = if addresses.len() < num_hops {
             let routers = addresses
@@ -486,6 +606,11 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                         && router_info.is_reachable()
                         && router_info.is_usable()
                         && self.can_participate(router_id)
+                        && self.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                            router_id,
+                            router_info,
+                            HopRole::Participant,
+                        )
                 },
             );
 
@@ -500,15 +625,20 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                 .collect::<HashMap<_, _>>();
 
             let untracked = (routers.len() + fast_router_addresses.len() < num_hops).then(|| {
-                let untracked_router_ids = self.profile_storage.get_router_ids(
-                    Bucket::Untracked,
-                    |router_id, router_info, profile| {
-                        !profile.is_failing::<R>()
-                            && router_info.is_reachable()
-                            && router_info.is_usable()
-                            && self.can_participate(router_id)
-                    },
-                );
+                    let untracked_router_ids = self.profile_storage.get_router_ids(
+                        Bucket::Untracked,
+                        |router_id, router_info, profile| {
+                            !profile.is_failing::<R>()
+                                && router_info.is_reachable()
+                                && router_info.is_usable()
+                                && self.can_participate(router_id)
+                                && self.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                                    router_id,
+                                    router_info,
+                                    HopRole::Participant,
+                                )
+                        },
+                    );
 
                 // group untracked routers by subnet and filter out subnets which the
                 // already-selected routers are part of
@@ -530,7 +660,13 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
                     let failing_router_ids = self.profile_storage.get_router_ids(
                         Bucket::Any,
                         |router_id, router_info, _| {
-                            router_info.is_reachable() && self.can_participate(router_id)
+                            router_info.is_reachable() 
+                                && self.can_participate(router_id)
+                                && self.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                                    router_id,
+                                    router_info,
+                                    HopRole::Participant,
+                                )
                         },
                     );
 
@@ -601,6 +737,13 @@ impl<R: Runtime> HopSelector for ExploratorySelector<R> {
             routers
         };
 
+        // Ensure endpoint position can use an endpoint router (can be unknown)
+        // For inbound: first position (index 0) is IBGW
+        // For outbound: last position (index num_hops - 1) is OBEP
+        // The secure path uses participant routers (known relays) which can also be endpoints
+        // So the endpoint position is already valid (known relays can be endpoints)
+        // But we could optionally replace it with an unknown router if available for better distribution
+        
         // register tunnel selection in each router's profile
         //
         // these are used to calculate the participation ratio, i.e., how often each router
@@ -767,78 +910,127 @@ impl<R: Runtime> TunnelSelector for ClientSelector<R> {
 }
 
 impl<R: Runtime> HopSelector for ClientSelector<R> {
-    fn select_hops(&self, num_hops: usize) -> Option<Vec<(Bytes, StaticPublicKey)>> {
-        let mut router_ids = self.exploratory.profile_storage.get_router_ids(
+    fn select_hops(&self, num_hops: usize, direction: crate::tunnel::hop::TunnelDirection) -> Option<Vec<(Bytes, StaticPublicKey)>> {
+        use crate::tunnel::hop::TunnelDirection;
+        use crate::i2np::HopRole;
+
+        // Filter routers that can be participants (must be known relays)
+        let mut participant_routers = self.exploratory.profile_storage.get_router_ids(
             Bucket::Fast,
             |router_id, router_info, profile| {
                 !profile.is_failing::<R>()
                     && router_info.is_reachable()
                     && router_info.is_usable()
                     && (self.exploratory.insecure || self.exploratory.can_participate(router_id))
+                    && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                        router_id,
+                        router_info,
+                        HopRole::Participant,
+                    )
             },
         );
 
+        // Filter routers that can be endpoints (can be unknown)
+        let endpoint_routers = self.exploratory.profile_storage.get_router_ids(
+            Bucket::Fast,
+            |router_id, router_info, profile| {
+                !profile.is_failing::<R>()
+                    && router_info.is_reachable()
+                    && router_info.is_usable()
+                    && (self.exploratory.insecure || self.exploratory.can_participate(router_id))
+                    && {
+                        let role = match direction {
+                            TunnelDirection::Inbound => HopRole::InboundGateway,
+                            TunnelDirection::Outbound => HopRole::OutboundEndpoint,
+                        };
+                        self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                            router_id,
+                            router_info,
+                            role,
+                        )
+                    }
+            },
+        );
+
+        // For participant positions, we need known relays
+        // For endpoint positions, we can use any router (known or unknown)
+        
         // insecure tunnels are allowed, don't do safety checks
         if self.exploratory.insecure {
-            shuffle(&mut router_ids, &mut R::rng());
+            // Determine how many participant positions we need
+            let num_participant_positions = match direction {
+                TunnelDirection::Inbound => num_hops - 1, // All except first (IBGW)
+                TunnelDirection::Outbound => num_hops - 1, // All except last (OBEP)
+            };
 
-            if router_ids.len() < num_hops {
-                let mut extra_router_ids = self.exploratory.profile_storage.get_router_ids(
+            // We need at least num_participant_positions known relays
+            if participant_routers.len() < num_participant_positions {
+                // Try to get more known relays from Standard bucket
+                let mut extra_participants = self.exploratory.profile_storage.get_router_ids(
                     Bucket::Standard,
-                    |_, router_info, profile| {
+                    |router_id, router_info, profile| {
                         !profile.is_failing::<R>()
                             && router_info.is_reachable()
                             && router_info.is_usable()
+                            && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                                router_id,
+                                router_info,
+                                HopRole::Participant,
+                            )
                     },
                 );
-
-                // if there aren't enough routers in the fast bucket,
-                // attempt to use untracked routers
-                let num_needed = num_hops - router_ids.len();
-
-                if num_needed > extra_router_ids.len() {
-                    let untracked = self.exploratory.profile_storage.get_router_ids(
-                        Bucket::Untracked,
-                        |_, router_info, profile| {
-                            !profile.is_failing::<R>()
-                                && router_info.is_reachable()
-                                && router_info.is_usable()
-                        },
-                    );
-
-                    extra_router_ids.extend(untracked);
-                    extra_router_ids = extra_router_ids
-                        .into_iter()
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                }
-
-                // if there aren't enough routers, use failing routers
-                if num_needed > extra_router_ids.len() {
-                    let failing = self
-                        .exploratory
-                        .profile_storage
-                        .get_router_ids(Bucket::Any, |_, router_info, _| {
-                            router_info.is_reachable()
-                        });
-
-                    extra_router_ids.extend(failing);
-                    extra_router_ids = extra_router_ids
-                        .into_iter()
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                }
-
-                if num_needed > extra_router_ids.len() {
-                    return None;
-                }
-
-                router_ids.extend(extra_router_ids.into_iter().take(num_needed));
+                participant_routers.extend(extra_participants);
             }
 
-            router_ids.iter().take(num_hops).for_each(|router_id| {
+            if participant_routers.len() < num_participant_positions {
+                return None; // Not enough known relays for participant positions
+            }
+
+            // Shuffle and select participant routers
+            let mut selected_routers = participant_routers;
+            shuffle(&mut selected_routers, &mut R::rng());
+            let selected_routers_vec: Vec<RouterId> = selected_routers.into_iter().collect();
+            let mut router_ids: Vec<RouterId> = selected_routers_vec.iter().take(num_participant_positions).cloned().collect();
+
+            // Add endpoint router if needed (for the endpoint position)
+            let mut endpoint_pool = endpoint_routers;
+            shuffle(&mut endpoint_pool, &mut R::rng());
+            
+            // Insert endpoint router at the correct position
+            if let Some(endpoint_router) = endpoint_pool.into_iter().next() {
+                match direction {
+                    TunnelDirection::Inbound => router_ids.insert(0, endpoint_router),
+                    TunnelDirection::Outbound => router_ids.push(endpoint_router),
+                }
+            } else {
+                // No endpoint router available, use a known relay as endpoint
+                if router_ids.len() < num_hops {
+                    if selected_routers_vec.len() > num_participant_positions {
+                        let additional_router = selected_routers_vec.get(num_participant_positions).cloned();
+                        if let Some(router) = additional_router {
+                            match direction {
+                                TunnelDirection::Inbound => router_ids.insert(0, router),
+                                TunnelDirection::Outbound => router_ids.push(router),
+                            }
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        return None; // Not enough routers
+                    }
+                }
+            }
+
+            // Ensure we have exactly num_hops
+            if router_ids.len() != num_hops {
+                if router_ids.len() > num_hops {
+                    router_ids.truncate(num_hops);
+                } else {
+                    return None;
+                }
+            }
+
+            router_ids.iter().for_each(|router_id| {
                 self.exploratory.profile_storage.selected_for_tunnel(router_id);
             });
 
@@ -860,7 +1052,8 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
 
         // group addresses by /16 subnet to prevent having two routers
         // from the same subnet in the same tunnel
-        let mut addresses = self.exploratory.group_by_subnet(router_ids);
+        // Use participant routers for subnet grouping
+        let mut addresses = self.exploratory.group_by_subnet(participant_routers);
 
         let router_ids = if addresses.len() < num_hops {
             let routers = addresses
@@ -880,6 +1073,11 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         && router_info.is_reachable()
                         && router_info.is_usable()
                         && self.exploratory.can_participate(router_id)
+                        && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                            router_id,
+                            router_info,
+                            HopRole::Participant,
+                        )
                 },
             );
 
@@ -903,6 +1101,11 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                                 && router_info.is_reachable()
                                 && router_info.is_usable()
                                 && self.exploratory.can_participate(router_id)
+                                && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                                    router_id,
+                                    router_info,
+                                    HopRole::Participant,
+                                )
                         },
                     );
 
@@ -929,6 +1132,11 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
                         |router_id, router_info, _| {
                             router_info.is_reachable()
                                 && self.exploratory.can_participate(router_id)
+                                && self.exploratory.private_network.lock().unwrap().can_be_tunnel_hop_with_role(
+                                    router_id,
+                                    router_info,
+                                    HopRole::Participant,
+                                )
                         },
                     );
 
@@ -1000,6 +1208,13 @@ impl<R: Runtime> HopSelector for ClientSelector<R> {
             routers
         };
 
+        // Ensure endpoint position can use an endpoint router (can be unknown)
+        // For inbound: first position (index 0) is IBGW
+        // For outbound: last position (index num_hops - 1) is OBEP
+        // The secure path uses participant routers (known relays) which can also be endpoints
+        // So the endpoint position is already valid (known relays can be endpoints)
+        // But we could optionally replace it with an unknown router if available for better distribution
+        
         // register tunnel selection in each router's profile
         //
         // these are used to calculate the participation ratio, i.e., how often each router
@@ -1033,7 +1248,8 @@ mod tests {
         runtime::mock::MockRuntime,
         tunnel::pool::TunnelPoolBuildParameters,
     };
-
+    use std::sync::{Arc as StdArc, Mutex};
+    
     #[tokio::test]
     async fn not_enough_routers_for_exploratory_tunnel() {
         let build_parameters = TunnelPoolBuildParameters::new(Default::default());
@@ -1051,8 +1267,9 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
-        assert!(selector.select_hops(5).is_none());
+        assert!(selector.select_hops(5, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -1072,13 +1289,14 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         // select hops 5 times and verify that the same set of hops is not selected every time
-        let hops = selector.select_hops(3).unwrap();
+        let hops = selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
 
         let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
-            let hops = selector.select_hops(3).unwrap();
+            let hops = selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
             if prev
                 .iter()
                 .zip(hops.iter())
@@ -1135,12 +1353,13 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         // there are only 3 standard routers so 2 routers must be fast
         let mut standard = 0usize;
         let mut fast = 0usize;
-        let hops = selector.select_hops(5).unwrap();
+        let hops = selector.select_hops(5, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
         let reader = profile_storage.reader();
 
         for (hash, _) in hops {
@@ -1175,10 +1394,11 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
-        assert!(selector.select_hops(5).is_none());
+        assert!(selector.select_hops(5, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -1199,15 +1419,16 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         // select hops 5 times and verify that the same set of hops is not selected every time
-        let hops = selector.select_hops(3).unwrap();
+        let hops = selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
 
         let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
-            let hops = selector.select_hops(3).unwrap();
+            let hops = selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
             if prev
                 .iter()
                 .zip(hops.iter())
@@ -1247,6 +1468,7 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
@@ -1254,7 +1476,7 @@ mod tests {
         // there are only 3 fast routers so 2 routers must be standard
         let mut standard = 0usize;
         let mut fast = 0usize;
-        let hops = selector.select_hops(5).unwrap();
+        let hops = selector.select_hops(5, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
         let reader = profile_storage.reader();
 
         for (hash, _) in hops {
@@ -1316,11 +1538,12 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         // since three hops were requested but there were only two subnets,
         // the request cannot be fulfilled
-        assert!(selector.select_hops(3).is_none());
+        assert!(selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -1369,13 +1592,14 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         // since three hops were requested but there were only two subnets,
         // the request cannot be fulfilled
-        assert!(selector.select_hops(3).is_none());
+        assert!(selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -1409,10 +1633,11 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         // 5 hops requested but only 3 routers in the standard category
-        assert!(selector.select_hops(5).is_none());
+        assert!(selector.select_hops(5, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -1447,12 +1672,13 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         // 5 hops requested but only 3 routers in the standard category
-        assert!(selector.select_hops(5).is_none());
+        assert!(selector.select_hops(5, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -1500,9 +1726,10 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
-        let hops = selector.select_hops(3).unwrap();
+        let hops = selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
         let reader = profile_storage.reader();
         assert!(hops.into_iter().all(|(hash, _)| reader
             .router_info(&RouterId::from(hash))
@@ -1557,11 +1784,12 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
-        let hops = selector.select_hops(3).unwrap();
+        let hops = selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
         let reader = profile_storage.reader();
         assert!(hops.into_iter().all(|(hash, _)| reader
             .router_info(&RouterId::from(hash))
@@ -1615,13 +1843,14 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
-        let hops = selector.select_hops(5usize).unwrap();
+        let hops = selector.select_hops(5usize, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
         let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
             let mut standard = 0usize;
             let mut fast = 0usize;
-            let hops = selector.select_hops(5).unwrap();
+            let hops = selector.select_hops(5, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
             let reader = profile_storage.reader();
 
             for (hash, _) in &hops {
@@ -1696,15 +1925,16 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
-        let hops = selector.select_hops(5usize).unwrap();
+        let hops = selector.select_hops(5usize, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
         let (num_same, _) = (0..5).fold((0usize, hops), |(count, prev), _| {
             let mut standard = 0usize;
             let mut fast = 0usize;
-            let hops = selector.select_hops(5).unwrap();
+            let hops = selector.select_hops(5, crate::tunnel::hop::TunnelDirection::Outbound).unwrap();
             let reader = profile_storage.reader();
 
             for (hash, _) in &hops {
@@ -1743,6 +1973,7 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         assert!(routers.iter().all(|router_id| selector.can_participate(router_id)));
 
@@ -1829,10 +2060,11 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         let hops1 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
@@ -1840,7 +2072,7 @@ mod tests {
         selector.add_tunnel(&hops1);
 
         let hops2 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
@@ -1848,7 +2080,7 @@ mod tests {
         selector.add_tunnel(&hops2);
 
         assert!(hops1.iter().all(|key| !hops2.contains(key)));
-        assert!(selector.select_hops(3).is_none());
+        assert!(selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -1868,10 +2100,11 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             true,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         let hops1 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
@@ -1879,14 +2112,14 @@ mod tests {
         selector.add_tunnel(&hops1);
 
         let hops2 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
             .collect::<HashSet<_>>();
         selector.add_tunnel(&hops2);
 
-        assert!(selector.select_hops(3).is_some());
+        assert!(selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).is_some());
     }
 
     #[tokio::test]
@@ -1914,24 +2147,25 @@ mod tests {
             profile_storage.clone(),
             build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
 
         let hops1 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
             .collect::<HashSet<_>>();
         selector.add_tunnel(&hops1);
         let hops2 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
             .collect::<HashSet<_>>();
         selector.add_tunnel(&hops2);
         let hops3 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
@@ -1960,7 +2194,7 @@ mod tests {
         assert!(hops1.iter().all(|key| !hops2.contains(key)));
         assert!(hops1.iter().all(|key| !hops3.contains(key)));
         assert!(hops2.iter().all(|key| !hops3.contains(key)));
-        assert!(selector.select_hops(3).is_none());
+        assert!(selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -1981,12 +2215,13 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         let hops1 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
@@ -1994,7 +2229,7 @@ mod tests {
         selector.exploratory.add_tunnel(&hops1);
 
         let hops2 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
@@ -2002,7 +2237,7 @@ mod tests {
         selector.exploratory.add_tunnel(&hops2);
 
         assert!(hops1.iter().all(|key| !hops2.contains(key)));
-        assert!(selector.select_hops(3).is_none());
+        assert!(selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 
     #[tokio::test]
@@ -2023,12 +2258,13 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             true,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         let hops1 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
@@ -2036,14 +2272,14 @@ mod tests {
         selector.exploratory.add_tunnel(&hops1);
 
         let hops2 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
             .collect::<HashSet<_>>();
         selector.exploratory.add_tunnel(&hops2);
 
-        assert!(selector.select_hops(3).is_some());
+        assert!(selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).is_some());
     }
 
     #[tokio::test]
@@ -2072,26 +2308,27 @@ mod tests {
             profile_storage.clone(),
             exploratory_build_parameters.context_handle.clone(),
             false,
+            StdArc::new(Mutex::new(PrivateNetworkValidator::new(None))),
         );
         let selector =
             ClientSelector::new(exploratory, client_build_parameters.context_handle.clone());
 
         let hops1 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
             .collect::<HashSet<_>>();
         selector.exploratory.add_tunnel(&hops1);
         let hops2 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
             .collect::<HashSet<_>>();
         selector.exploratory.add_tunnel(&hops2);
         let hops3 = selector
-            .select_hops(3)
+            .select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound)
             .unwrap()
             .into_iter()
             .map(|(key, _)| RouterId::from(key))
@@ -2123,6 +2360,6 @@ mod tests {
         assert!(hops1.iter().all(|key| !hops2.contains(key)));
         assert!(hops1.iter().all(|key| !hops3.contains(key)));
         assert!(hops2.iter().all(|key| !hops3.contains(key)));
-        assert!(selector.select_hops(3).is_none());
+        assert!(selector.select_hops(3, crate::tunnel::hop::TunnelDirection::Outbound).is_none());
     }
 }

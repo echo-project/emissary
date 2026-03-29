@@ -51,27 +51,27 @@ pub struct ExploratoryConfig {
     pub outbound_count: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Ntcp2Config {
     pub port: u16,
     pub host: Option<Ipv4Addr>,
     pub publish: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Ssu2Config {
     pub port: u16,
     pub host: Option<Ipv4Addr>,
     pub publish: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct I2cpConfig {
     pub port: u16,
     pub host: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SamConfig {
     pub tcp_port: u16,
     pub udp_port: u16,
@@ -162,7 +162,14 @@ pub struct RouterUiConfig {
     pub port: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PrivateNetworkConfig {
+    pub enabled: bool,
+    pub known_relays: Vec<String>,
+    pub min_bandwidth: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EmissaryConfig {
     #[serde(rename = "address-book")]
     pub address_book: Option<AddressBookConfig>,
@@ -194,19 +201,25 @@ pub struct EmissaryConfig {
     #[serde(rename = "server-tunnels")]
     pub server_tunnels: Option<Vec<ServerTunnelConfig>>,
     #[serde(rename = "router-ui")]
-    pub router_ui: Option<RouterUiConfig>,
+    router_ui: Option<RouterUiConfig>,
+    #[serde(rename = "private-network")]
+    private_network: Option<PrivateNetworkConfig>,
+    #[serde(rename = "reseed-api-url")]
+    reseed_api_url: Option<String>,
 }
 
 impl Default for EmissaryConfig {
     fn default() -> Self {
         Self {
-            address_book: Some(AddressBookConfig {
-                default: Some(String::from(
-                    "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
-                )),
-                subscriptions: None,
-            }),
-            caps: Some(String::from("XR")),
+            net_id: Some(27u8),  //27=echo net
+            address_book: None,
+            // address_book: Some(AddressBookConfig {
+            //     default: Some(String::from(
+            //         "http://udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p/hosts.txt",
+            //     )),
+            //     subscriptions: None,
+            // }),
+            caps: Some(String::from("XfR")), //XfR = Floodfill Router, L = Local Router
             http_proxy: Some(HttpProxyConfig {
                 host: "127.0.0.1".to_string(),
                 port: 4444u16,
@@ -231,11 +244,12 @@ impl Default for EmissaryConfig {
                 host: None,
                 publish: Some(true),
             }),
-            port_forwarding: Some(PortForwardingConfig {
-                nat_pmp: true,
-                upnp: true,
-                name: String::from("emissary"),
-            }),
+            port_forwarding: None,
+            // port_forwarding: Some(PortForwardingConfig {
+            //     nat_pmp: true,
+            //     upnp: true,
+            //     name: String::from("emissary"),
+            // }),
             reseed: Some(ReseedConfig {
                 reseed_threshold: 25usize,
                 hosts: None,
@@ -255,13 +269,18 @@ impl Default for EmissaryConfig {
             }),
             allow_local: false,
             exploratory: None,
-            floodfill: false,
+            floodfill: true,  //true = Floodfill Router, false = Local Router
             insecure_tunnels: false,
             log: None,
-            net_id: None,
             ssu2: None,
             client_tunnels: None,
             server_tunnels: None,
+            private_network: Some(PrivateNetworkConfig {
+                enabled: false,
+                known_relays: vec![],
+                min_bandwidth: Some("O".to_string()),
+            }),
+            reseed_api_url: None,
         }
     }
 }
@@ -349,6 +368,12 @@ pub struct Config {
     /// Transit tunnel config.
     pub transit: Option<emissary_core::TransitConfig>,
 
+    /// Private network config.
+    pub private_network: Option<emissary_core::PrivateNetworkConfig>,
+
+    /// Optional reseed API server URL for private network mode.
+    /// If not provided, API calls to update router info are skipped.
+    pub reseed_api_url: Option<String>,
     /// Config which is stored on disk.
     ///
     /// This is passed onto the UI.
@@ -376,6 +401,8 @@ impl From<Config> for emissary_core::Config {
             static_key: Some(val.static_key),
             transit: val.transit,
             refresh_interval: val.router_ui.map(|config| config.refresh_interval),
+            private_network: val.private_network,
+            reseed_api_url: val.reseed_api_url,
         }
     }
 }
@@ -603,6 +630,12 @@ impl Config {
             transit: config.transit.map(|config| emissary_core::TransitConfig {
                 max_tunnels: config.max_tunnels,
             }),
+            private_network: config.private_network.map(|config| emissary_core::PrivateNetworkConfig {
+                enabled: config.enabled,
+                known_relays: config.known_relays,
+                min_bandwidth: config.min_bandwidth,
+            }),
+            reseed_api_url: config.reseed_api_url,
             config: Some(config_copy),
         })
     }
@@ -840,10 +873,6 @@ mod tests {
             base_path: None,
             command: None,
             log: None,
-            #[cfg(any(
-                all(feature = "native-ui", not(feature = "web-ui")),
-                all(not(feature = "native-ui"), feature = "web-ui")
-            ))]
             router_ui: crate::cli::RouterUiOptions {
                 disable_ui: None,
                 refresh_interval: None,

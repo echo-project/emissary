@@ -23,6 +23,7 @@ use crate::{
     router::context::RouterContext,
     runtime::{MetricType, Runtime},
     shutdown::ShutdownHandle,
+    private_network::PrivateNetworkValidator,
     subsystem::SubsystemHandle,
     tunnel::{
         handle::{CommandRecycle, TunnelManagerCommand},
@@ -40,6 +41,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+use std::sync::{Arc as StdArc, Mutex};
 
 mod fragment;
 mod garlic;
@@ -96,6 +98,7 @@ impl<R: Runtime> TunnelManager<R> {
         transit_shutdown_handle: ShutdownHandle,
         subsystem_handle: SubsystemHandle,
         subsys_transit_rx: Receiver<Vec<(RouterId, Message)>>,
+        private_network: StdArc<Mutex<PrivateNetworkValidator>>,
     ) -> (Self, TunnelManagerHandle, TunnelPoolHandle) {
         tracing::info!(
             target: LOG_TARGET,
@@ -123,6 +126,7 @@ impl<R: Runtime> TunnelManager<R> {
                 router_ctx.profile_storage().clone(),
                 build_parameters.context_handle.clone(),
                 insecure_tunnels,
+                private_network.clone()
             );
             let (tunnel_pool, tunnel_pool_handle) = TunnelPool::<R, _>::new(
                 build_parameters,

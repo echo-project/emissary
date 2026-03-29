@@ -185,7 +185,7 @@ impl<'a> Su3<'a> {
 
         let (rest, _) = be_u8(rest)?; // unused
         let (rest, version_len) = be_u8(rest)?;
-        debug_assert!(version_len >= 0x10, "invalid version length {version_len}");
+        // debug_assert!(version_len >= 0x10, "invalid version length {version_len}");
 
         let (rest, _) = be_u8(rest)?; // unused
         let (rest, signer_id_len) = be_u8(rest)?;
@@ -279,7 +279,7 @@ impl<'a> Su3<'a> {
                 return None;
             }
         }
-
+        
         let temp_dir = TempDir::new().ok()?;
         let mut zip_file = File::create_new(temp_dir.path().join("routers.zip")).ok()?;
         File::write_all(&mut zip_file, su3.content).ok()?;

@@ -95,6 +95,8 @@ impl HttpProxy {
             publish: false,
             samv3_tcp_port,
             nickname: "http-proxy".to_string(),
+            inbound_len: 2,             // inbound hops count :ToDo: make this configurable
+            outbound_len: 2,             // outbound hops count :ToDo: make this configurable
             ..Default::default()
         })
         .await?;

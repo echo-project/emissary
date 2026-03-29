@@ -252,6 +252,11 @@ impl RouterIdentity {
         SERIALIZED_LEN
     }
 
+    /// Get padding bytes.
+    pub fn padding(&self) -> Bytes {
+        self.padding.clone()
+    }
+
     /// Generate random [`RouterIdentity`].
     #[cfg(test)]
     pub fn random() -> (Self, StaticPrivateKey, SigningPrivateKey) {

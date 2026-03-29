@@ -18,6 +18,7 @@
 
 use clap::{ArgGroup, Subcommand};
 
+pub mod reseed_api;
 mod base64;
 mod devnet;
 

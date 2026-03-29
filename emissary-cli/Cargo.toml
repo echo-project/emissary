@@ -25,12 +25,15 @@ serde_json = { version = "1.0.140", optional = true }
 thiserror = "2.0.12"
 tokio-tungstenite = { version = "0.27.0", default-features = false, features = ["native-tls"], optional = true }
 url = "2.5.4"
+base64 = "0.21"
 
 # workspace dependencies
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["json", "http2"] }
+smol = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 tokio = { workspace = true }
@@ -43,7 +46,7 @@ yosemite = { workspace = true }
 fast-socks5 = { version = "0.10.0", features = ["socks4"] }
 
 [features]
-default = ["native-ui"]
-native-ui = ["chrono", "iced", "plotters", "plotters-iced"]
+default = ["web-ui"]
+native-ui = ["chrono", "iced", "plotters", "plotters-iced", "serde_json"]
 web-ui = ["axum", "serde_json", "tokio-tungstenite"]
 metrics = ["emissary-util/metrics"]

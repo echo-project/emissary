@@ -509,7 +509,25 @@ impl<R: Runtime, T: Tunnel<R>> PendingTunnel<R, T> {
                         hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
                         return Err(hop_results);
                     }
-                    Some(record) =>
+                    Some(record) => {
+                        // // Find the fake record index once
+                        // let fake_record_idx = message.payload[1..]
+                        //     .chunks(SHORT_RECORD_LEN)
+                        //     .position(|chunk| &chunk[..16] == &local_hash[..16])
+                        //     .expect("fake record to exist");
+                        
+                        // // Decrypt the fake record using all hops' reply keys in reverse order
+                        // // Transit routers encrypted it in forward order during the request phase,
+                        // // so we decrypt in reverse order (last router first, first router last)
+                        // let mut decrypted_record = record.to_vec();
+                        // for hop in self.hops.iter().rev() {
+                        //     // Each transit router encrypted all records except its own
+                        //     if fake_record_idx != hop.record_index() {
+                        //         ChaCha::with_nonce(hop.key_context.reply_key(), fake_record_idx as u64)
+                        //             .decrypt_ref(&mut decrypted_record);
+                        //     }
+                        // }
+
                         if Sha256::new().update(record).finalize_new() != checksum {
                             tracing::warn!(
                                 target: LOG_TARGET,
@@ -520,7 +538,15 @@ impl<R: Runtime, T: Tunnel<R>> PendingTunnel<R, T> {
 
                             hop_results[0].1 = Some(Err(TunnelError::InvalidMessage));
                             return Err(hop_results);
-                        },
+                        } else {
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                tunnel = %self.tunnel_id,
+                                direction = ?T::direction(),
+                                "fake local record okay",
+                            );
+                        }
+                    }
                 }
 
                 message.payload.to_vec()

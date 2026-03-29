@@ -17,7 +17,8 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    config::{Config, I2cpConfig, MetricsConfig, SamConfig},
+    config::{Config, I2cpConfig, MetricsConfig, SamConfig}, 
+    private_network::PrivateNetworkValidator,
     crypto::{SigningPrivateKey, StaticPrivateKey},
     error::Error,
     events::{EventManager, EventSubscriber},
@@ -47,6 +48,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+use std::sync::{Arc as StdArc, Mutex};
 
 pub mod context;
 
@@ -151,6 +153,11 @@ pub struct Router<R: Runtime> {
 
     /// Handle to [`TunnelManager`].
     _tunnel_manager_handle: TunnelManagerHandle,
+
+    /// Private network validator.
+    ///
+    /// Used to validate private network connections.
+    private_network_validator: StdArc<Mutex<PrivateNetworkValidator>>,
 }
 
 impl<R: Runtime> Router<R> {
@@ -217,8 +224,17 @@ impl<R: Runtime> Router<R> {
             metrics,
             transit,
             refresh_interval,
+            private_network,
             ..
         } = config;
+
+        // let private_network_validator = PrivateNetworkValidator::new(Some(&private_network.unwrap_or(
+        //     crate::PrivateNetworkConfig { enabled: true, known_relays: vec![], min_bandwidth: Some("O".to_string()) }
+        // )));
+
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(Some(&private_network.unwrap_or(
+            crate::PrivateNetworkConfig { enabled: true, known_relays: vec![], min_bandwidth: Some("O".to_string()) }
+        )))));
 
         let profile_storage = ProfileStorage::<R>::new(&routers, &profiles);
         let serialized_router_info = local_router_info.serialize(&local_signing_key);
@@ -325,6 +341,25 @@ impl<R: Runtime> Router<R> {
         // initialize and start tunnel manager
         //
         // acquire handle to exploratory tunnel pool which is given to `NetDb`
+        // let (tunnel_manager_handle, exploratory_pool_handle, routing_table, netdb_msg_rx) = {
+        //     let transport_service =
+        //         transport_manager_builder.register_subsystem(SubsystemKind::Tunnel);
+        //     let (
+        //         tunnel_manager,
+        //         tunnel_manager_handle,
+        //         tunnel_pool_handle,
+        //         routing_table,
+        //         netdb_msg_rx,
+        //     ) = TunnelManager::<R>::new(
+        //         transport_service,
+        //         router_ctx.clone(),
+        //         exploratory.into(),
+        //         insecure_tunnels,
+        //         transit,
+        //         transit_shutdown_handle,
+        //         private_network_validator.clone()
+        //     );
+
         let (tunnel_manager_handle, exploratory_pool_handle) = {
             let (tunnel_manager, tunnel_manager_handle, tunnel_pool_handle) =
                 TunnelManager::<R>::new(
@@ -335,6 +370,7 @@ impl<R: Runtime> Router<R> {
                     transit_shutdown_handle,
                     handle.clone(),
                     transit_rx,
+                    private_network_validator.clone(),
                 );
             R::spawn(tunnel_manager);
 
@@ -349,6 +385,7 @@ impl<R: Runtime> Router<R> {
                 exploratory_pool_handle,
                 netdb_rx,
                 handle,
+                private_network_validator.clone(),
             );
             R::spawn(netdb);
 
@@ -443,6 +480,7 @@ impl<R: Runtime> Router<R> {
                 shutdown_count: 0usize,
                 transport_manager: transport_manager_builder.build(),
                 _tunnel_manager_handle: tunnel_manager_handle,
+                private_network_validator: private_network_validator,
             },
             event_subscriber,
             serialized_router_info,
@@ -491,6 +529,10 @@ impl<R: Runtime> Router<R> {
     /// a warning is logged.
     pub fn add_external_address(&mut self, address: Ipv4Addr) {
         self.transport_manager.add_external_address(address);
+    }
+
+    pub fn update_relay_list(&self, relay_list: Vec<String>) {
+        self.private_network_validator.lock().unwrap().update_relay_list(relay_list);
     }
 }
 

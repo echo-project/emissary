@@ -42,6 +42,7 @@ use crate::{
     runtime::{Counter, Gauge, Histogram, Instant, JoinSet, MetricType, MetricsHandle, Runtime},
     subsystem::{NetDbEvent, SubsystemHandle},
     tunnel::{TunnelPoolEvent, TunnelPoolHandle},
+    private_network::PrivateNetworkValidator,
 };
 
 use bytes::{Bytes, BytesMut};
@@ -59,6 +60,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+use std::sync::{Arc as StdArc, Mutex};
 
 pub use dht::Dht;
 pub use handle::NetDbHandle;
@@ -142,6 +144,9 @@ pub struct NetDb<R: Runtime> {
     /// Router context.
     router_ctx: RouterContext<R>,
 
+    /// Private network validator.
+    private_network: PrivateNetworkValidator,
+
     /// DHT of non-floodfill routers.
     ///
     /// Available only if the router is acting as a floodfill router.
@@ -166,6 +171,7 @@ impl<R: Runtime> NetDb<R> {
         exploratory_pool_handle: TunnelPoolHandle,
         netdb_rx: mpsc::Receiver<NetDbEvent>,
         subsystem_handle: SubsystemHandle,
+        private_network: StdArc<Mutex<PrivateNetworkValidator>>,
     ) -> (Self, NetDbHandle) {
         let floodfills = router_ctx
             .profile_storage()
@@ -233,6 +239,7 @@ impl<R: Runtime> NetDb<R> {
                 pending_ready_awaits: Vec::new(),
                 query_timers: R::join_set(),
                 router_ctx: router_ctx.clone(),
+                private_network: private_network.lock().unwrap().clone(),
                 router_dht,
                 router_infos: HashMap::new(),
                 subsystem_handle,
@@ -314,13 +321,23 @@ impl<R: Runtime> NetDb<R> {
         let published = *router_info.published.date();
 
         if router_info.is_floodfill() {
-            self.floodfill_dht.add_router(router_id.clone());
+            // Only add floodfill routers that are allowed by private network policy
+            if self.private_network.can_be_floodfill(&router_id, &router_info) {
+                self.floodfill_dht.add_router(router_id.clone());
+            } else {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    %router_id,
+                    "router rejected as floodfill: not allowed by private network policy"
+                );
+            }
         }
 
         // store both the new router info and its serialized form to profile storage
         //
         // the latter is used when a backup of profile storage is made to disk
         let raw_router_info = DatabaseStore::<R>::extract_raw_router_info(message);
+        let router_info_clone = router_info.clone();
         self.router_ctx
             .profile_storage()
             .discover_router(router_info, raw_router_info.clone());
@@ -335,7 +352,17 @@ impl<R: Runtime> NetDb<R> {
             key.clone(),
             (raw_router_info.clone(), Duration::from_millis(published)),
         );
-        self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
+        
+        // Only add routers that are allowed by private network policy
+        if self.private_network.can_be_added_to_routing_table(&router_id, &router_info_clone) {
+            self.router_dht.as_mut().map(|dht| dht.add_router(router_id.clone()));
+        } else {
+            tracing::debug!(
+                target: LOG_TARGET,
+                %router_id,
+                "router rejected from routing table: not allowed by private network policy"
+            );
+        }
 
         match reply {
             StoreReplyType::None => {
@@ -954,9 +981,28 @@ impl<R: Runtime> NetDb<R> {
                     }
 
                     if router_info.is_floodfill() {
-                        self.floodfill_dht.add_router(router_id.clone());
+                        // Only add floodfill routers that are allowed by private network policy
+                        if self.private_network.can_be_floodfill(&router_id, &router_info) {
+                            self.floodfill_dht.add_router(router_id.clone());
+                        } else {
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                %router_id,
+                                "router rejected as floodfill: not allowed by private network policy"
+                            );
+                        }
                     }
-                    self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
+                    
+                    // Only add routers that are allowed by private network policy
+                    if self.private_network.can_be_added_to_routing_table(&router_id, &router_info) {
+                        self.router_dht.as_mut().map(|dht| dht.add_router(router_id));
+                    } else {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            %router_id,
+                            "router rejected from routing table: not allowed by private network policy"
+                        );
+                    }
 
                     // if the router info was received directly from the floodfill, i.e., not
                     // through tunnel, adjust the floodfill score
@@ -2008,6 +2054,8 @@ mod tests {
             EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (_netdb_tx, netdb_rx) = channel(64);
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2023,6 +2071,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
         tokio::spawn(manager);
 
@@ -2121,6 +2170,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2136,6 +2187,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let (key, lease_set) = {
@@ -2218,6 +2270,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2233,6 +2287,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let (key, lease_set) = {
@@ -2317,6 +2372,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2332,6 +2389,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let (key1, expired_lease_set1) = {
@@ -2632,6 +2690,8 @@ mod tests {
             EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (_netdb_tx, netdb_rx) = channel(64);
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2647,6 +2707,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
         tokio::spawn(manager);
 
@@ -2741,6 +2802,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2756,6 +2819,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let (key, router_info) = {
@@ -2830,6 +2894,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2845,6 +2911,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let (key, lease_set, expires) = {
@@ -2951,6 +3018,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -2966,6 +3035,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let key = Bytes::from(DestinationId::random().to_vec());
@@ -3052,6 +3122,8 @@ mod tests {
             EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (_netdb_tx, netdb_rx) = channel(64);
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3067,6 +3139,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
         tokio::spawn(manager);
 
@@ -3191,6 +3264,8 @@ mod tests {
             EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (_netdb_tx, netdb_rx) = channel(64);
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3206,6 +3281,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
         tokio::spawn(manager);
 
@@ -3299,6 +3375,8 @@ mod tests {
             EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (_netdb_tx, netdb_rx) = channel(64);
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3314,6 +3392,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
         tokio::spawn(manager);
 
@@ -3378,6 +3457,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3393,6 +3474,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let (key, router_info) = {
@@ -3466,6 +3548,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3481,6 +3565,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let (key, lease_set) = {
@@ -3558,6 +3643,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3573,6 +3660,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         let (key, router_info) = {
@@ -3647,6 +3735,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3662,6 +3752,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         netdb
@@ -3832,6 +3923,8 @@ mod tests {
             EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (_netdb_tx, netdb_rx) = channel(64);
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+        
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3847,6 +3940,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
         tokio::spawn(manager);
 
@@ -3931,6 +4025,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+        
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -3946,6 +4042,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         netdb
@@ -4001,6 +4098,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+        
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4016,6 +4115,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         netdb
@@ -4078,6 +4178,8 @@ mod tests {
         let (_netdb_tx, netdb_rx) = channel(64);
         let (handle, _event_rx) = SubsystemHandle::new();
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+        
         let (mut netdb, handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4093,6 +4195,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
 
         netdb
@@ -4172,6 +4275,8 @@ mod tests {
             EventManager::new(None, MockRuntime::register_metrics(vec![], None));
         let (_netdb_tx, netdb_rx) = channel(64);
 
+        let private_network_validator = StdArc::new(Mutex::new(PrivateNetworkValidator::new(None)));
+        
         let (mut netdb, _handle) = NetDb::<MockRuntime>::new(
             RouterContext::new(
                 MockRuntime::register_metrics(vec![], None),
@@ -4187,6 +4292,7 @@ mod tests {
             tp_handle,
             netdb_rx,
             handle,
+            private_network_validator,
         );
         tokio::spawn(manager);
 
